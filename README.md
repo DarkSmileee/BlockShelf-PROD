@@ -46,7 +46,7 @@
 One-line installation for Ubuntu/Debian servers:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf/main/scripts/install_blockshelf.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf-PROD/main/scripts/install_blockshelf.sh | sudo bash
 ```
 
 The installer walks you through hostname, time zone, email backend, Cloudflare Turnstile keys, and whether to seed an admin user—no manual `.env` edits required for common settings.
@@ -84,7 +84,7 @@ When enabled, both the first-party login page (`/login/`) and the allauth page (
 ### Update Existing Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf/main/scripts/update.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf-PROD/main/scripts/update.sh | sudo bash
 ```
 
 **What it does:**
