@@ -28,15 +28,56 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Check if BlockShelf already exists
-if [ -d "$APP_DIR" ] || [ -f "$ENV_FILE" ] || systemctl list-unit-files | grep -q "^$SERVICE_NAME.service"; then
-    echo "⚠️  WARNING: Existing BlockShelf installation detected!"
+# Check for remnants of a previous installation
+EXISTING_INSTALL=0
+EXISTING_REASONS=""
+
+if [ -d "$APP_DIR" ]; then
+    EXISTING_INSTALL=1
+    EXISTING_REASONS+="  • Application directory $APP_DIR exists\n"
+fi
+
+if [ -f "$ENV_FILE" ]; then
+    EXISTING_INSTALL=1
+    EXISTING_REASONS+="  • Environment file $ENV_FILE exists\n"
+fi
+
+if systemctl list-unit-files | grep -q "^$SERVICE_NAME.service"; then
+    EXISTING_INSTALL=1
+    EXISTING_REASONS+="  • Systemd service $SERVICE_NAME.service already defined\n"
+fi
+
+if systemctl list-unit-files | grep -q "^blockshelf-backup.timer"; then
+    EXISTING_INSTALL=1
+    EXISTING_REASONS+="  • Backup timer blockshelf-backup.timer already defined\n"
+fi
+
+if id -u $APP_USER >/dev/null 2>&1; then
+    EXISTING_INSTALL=1
+    EXISTING_REASONS+="  • System user '$APP_USER' already exists\n"
+fi
+
+if command -v psql >/dev/null 2>&1; then
+    if sudo -u postgres psql -Atqc "SELECT 1 FROM pg_database WHERE datname='blockshelf';" | grep -q 1 2>/dev/null; then
+        EXISTING_INSTALL=1
+        EXISTING_REASONS+="  • PostgreSQL database 'blockshelf' exists\n"
+    fi
+    if sudo -u postgres psql -Atqc "SELECT 1 FROM pg_roles WHERE rolname='blockshelf';" | grep -q 1 2>/dev/null; then
+        EXISTING_INSTALL=1
+        EXISTING_REASONS+="  • PostgreSQL role 'blockshelf' exists\n"
+    fi
+fi
+
+if [ $EXISTING_INSTALL -eq 1 ]; then
+    echo "⚠️  WARNING: Existing BlockShelf installation (or remnants) detected!"
+    if [ -n "$EXISTING_REASONS" ]; then
+        echo -e "Found:\n$EXISTING_REASONS"
+    fi
     echo ""
-    echo "This will:"
-    echo "  • Stop and remove the BlockShelf service"
-    echo "  • Delete all files in $APP_DIR"
-    echo "  • Delete configuration in /etc/blockshelf"
-    echo "  • DROP and recreate the PostgreSQL database (ALL DATA WILL BE LOST)"
+    echo "This fresh install will:"
+    echo "  • Stop and remove BlockShelf services/timers"
+    echo "  • Delete all files in $APP_DIR and /etc/blockshelf"
+    echo "  • DROP the 'blockshelf' PostgreSQL database and role (ALL DATA WILL BE LOST)"
     echo ""
 
     if [ $INTERACTIVE -eq 1 ]; then
@@ -71,7 +112,7 @@ if [ -d "$APP_DIR" ] || [ -f "$ENV_FILE" ] || systemctl list-unit-files | grep -
     rm -rf $APP_DIR
     rm -rf /etc/blockshelf
 
-    # Drop database
+    # Drop database/user (ignore errors if PostgreSQL isn't installed yet)
     sudo -u postgres psql -c "DROP DATABASE IF EXISTS blockshelf;" 2>/dev/null || true
     sudo -u postgres psql -c "DROP USER IF EXISTS blockshelf;" 2>/dev/null || true
 
@@ -203,9 +244,9 @@ sudo -u postgres psql -c "CREATE USER blockshelf WITH PASSWORD '$DB_PASSWORD';"
 sudo -u postgres psql -c "CREATE DATABASE blockshelf OWNER blockshelf;"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE blockshelf TO blockshelf;"
 
-echo "→ Creating application directory..."
-mkdir -p $APP_DIR
-chown $APP_USER:$APP_USER $APP_DIR
+echo "→ Preparing application directory..."
+rm -rf $APP_DIR
+mkdir -p "$(dirname "$APP_DIR")"
 
 echo "→ Cloning repository..."
 sudo -u $APP_USER git clone https://github.com/DarkSmileee/BlockShelf.git $APP_DIR
