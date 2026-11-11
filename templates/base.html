@@ -11,10 +11,12 @@
     (function () {
       try {
         var key = 'ui.theme';
-        // Try localStorage first, then server-rendered data-bs-theme, else system
-        var theme = localStorage.getItem(key) ||
-                    (document.documentElement.getAttribute('data-bs-theme') || '').trim();
+        // The cookie also reflects preferences saved through the theme endpoint.
+        var theme = (document.documentElement.getAttribute('data-bs-theme') || '').trim();
         if (!theme) {
+          try { theme = localStorage.getItem(key); } catch (e) { /* cookie still works */ }
+        }
+        if (theme !== 'light' && theme !== 'dark') {
           theme = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
             ? 'dark' : 'light';
         }
@@ -89,6 +91,9 @@
 
 
       <section class="app-content container-fluid py-4">
+        {% for message in messages %}
+          <div data-flash-message class="alert alert-{% if message.level == 40 %}danger{% else %}{{ message.tags|default:'info' }}{% endif %}" role="{% if message.level == 40 %}alert{% else %}status{% endif %}">{{ message }}</div>
+        {% endfor %}
         {% block content %}{% endblock %}
       </section>
     </main>
@@ -114,15 +119,15 @@
     const getSystem = () => window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     const html = document.documentElement;
     const cookieTheme = html.getAttribute('data-cookie-theme') || '';
-    const saved = localStorage.getItem(key);
-    const initial = saved || cookieTheme || getSystem();
-    const apply = (t) => {html.setAttribute('data-theme', t); html.setAttribute('data-bs-theme', t);};
-    apply(initial);
-
-    function getCookie(name){
-      const m = document.cookie.match('(?:^|;)\s*' + name + '=([^;]*)');
-      return m ? decodeURIComponent(m[1]) : '';
-    }
+    let saved = '';
+    try { saved = localStorage.getItem(key); } catch (e) { /* cookie still works */ }
+    let preference = cookieTheme || saved || 'system';
+    const apply = (t) => {
+      const resolved = t === 'light' || t === 'dark' ? t : getSystem();
+      html.setAttribute('data-theme', resolved);
+      html.setAttribute('data-bs-theme', resolved);
+    };
+    apply(preference);
 
     const btn = document.getElementById('themeToggle');
     if(btn){
@@ -130,18 +135,16 @@
         const current = html.getAttribute('data-theme') || getSystem();
         const next = current === 'dark' ? 'light' : 'dark';
         apply(next);
-        localStorage.setItem(key, next);
+        preference = next;
+        try { localStorage.setItem(key, next); } catch (e) { /* cookie still works */ }
         // also set a cookie for server-side awareness
         document.cookie = 'theme=' + encodeURIComponent(next) + ';path=/;max-age=' + (60*60*24*365);
-        // Optional: POST to persist later when DB model exists
-        // fetch("{% url 'inventory:set_theme' %}", { method:'POST', headers:{'X-CSRFToken': getCookie('csrftoken')}, body: new URLSearchParams({theme: next}) });
       });
     }
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     if (mq.addEventListener) {
       mq.addEventListener('change', e => {
-        const stored = localStorage.getItem(key);
-        if(!stored){ apply(e.matches ? 'dark':'light'); }
+        if(preference !== 'light' && preference !== 'dark'){ apply(e.matches ? 'dark':'light'); }
       });
     }
   })();

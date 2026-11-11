@@ -32,7 +32,9 @@ class Command(BaseCommand):
                 'account_lockout:',
             ]
 
-            cleared_count = 0
+            from inventory.models import RateLimitBucket
+            cleared_count, _ = RateLimitBucket.objects.filter(key__startswith='login:').delete()
+            RateLimitBucket.objects.filter(key__startswith='signup:').delete()
             
             # For database cache backend
             if hasattr(cache, '_table'):

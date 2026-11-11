@@ -4,7 +4,7 @@ from inventory.models import RBColor, RBPart, RBElement
 
 def _open(path):
     # supports .csv and .csv.gz
-    return gzip.open(path, mode="rt", encoding="utf-8") if path.lower().endswith(".gz") else open(path, "r", encoding="utf-8", newline="")
+    return gzip.open(path, mode="rt", encoding="utf-8-sig") if path.lower().endswith(".gz") else open(path, "r", encoding="utf-8-sig", newline="")
 
 class Command(BaseCommand):
     help = "Load Rebrickable CSV dumps into local tables (colors, parts, elements)."

@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Accept inventory invitation</h1>
+<p>{{ invite.owner.username }} invited you to their inventory.</p>
+<p>Editing: {{ invite.can_edit|yesno:"allowed,not allowed" }}. Deleting: {{ invite.can_delete|yesno:"allowed,not allowed" }}.</p>
+<form method="post">{% csrf_token %}<button type="submit" class="btn btn-primary">Accept invitation</button></form>
+{% endblock %}

@@ -1,3 +1,5 @@
+> Historical security notes: the unused `file_validation.py` module and python-magic dependency were removed. Uploads are validated in the active forms/parsers, with expanded-byte and row limits. ClamAV scanning is not implemented. See AUDIT_FIXES.md for current behavior.
+
 # Security Audit Response - BlockShelf
 
 **Date**: 2025-10-10

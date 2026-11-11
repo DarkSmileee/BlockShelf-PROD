@@ -10,6 +10,9 @@ import os
 import re
 import shutil
 import tempfile
+import time
+from pathlib import Path
+from django.conf import settings
 import zipfile
 from io import BytesIO
 from typing import Any, Iterator
@@ -46,64 +49,88 @@ def json_err(msg: str, status: int = 400) -> JsonResponse:
 # File & Path Helpers
 # -------------------------------------------------------------------------------------------------
 
+MAX_EXPANDED_BYTES = 512 * 1024 * 1024
+
+
+def cleanup_import_dirs():
+    root = Path(settings.REBRICKABLE_TEMP_ROOT)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for directory in root.glob('rebrickable_*'):
+        if not directory.is_symlink() and directory.is_dir() and time.time() - directory.stat().st_mtime > 3600:
+            shutil.rmtree(directory)
+
+
 def create_temp_dir() -> str:
-    """Create a temporary directory for Rebrickable imports."""
-    return tempfile.mkdtemp(prefix="rebrickable_")
+    cleanup_import_dirs()
+    return tempfile.mkdtemp(prefix='rebrickable_', dir=settings.REBRICKABLE_TEMP_ROOT)
 
 
-def count_csv_rows(path: str) -> int:
-    """
-    Count data rows in a CSV file (excluding header).
-    Supports both .csv and .csv.gz files.
-    """
-    opener = gzip.open if path.lower().endswith(".gz") else open
-    with opener(path, "rt", encoding="utf-8", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            next(reader)  # Skip header
-        except StopIteration:
-            return 0
-        return sum(1 for _ in reader)
+def copy_bounded(source, destination, max_bytes=MAX_EXPANDED_BYTES):
+    total = 0
+    while True:
+        chunk = source.read(min(1024 * 1024, max_bytes - total + 1))
+        if not chunk:
+            return
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError('Expanded upload is too large')
+        destination.write(chunk)
+
+
+def index_csv_rows(path: str, max_rows=1_000_000) -> dict:
+    """Index logical CSV records once, including quoted multiline records."""
+    with open(path, 'rt', encoding='utf-8-sig', newline='') as source:
+        # readline iteration keeps tell() usable; normal text iteration disables it.
+        reader = csv.DictReader(iter(source.readline, ''))
+        headers = reader.fieldnames
+        positions = [source.tell()]
+        count = 0
+        for count, row in enumerate(reader, 1):
+            if count > max_rows:
+                raise ValueError(f'File exceeds {max_rows} rows')
+            if count % 100 == 0:
+                positions.append(source.tell())
+        return {'count': count, 'headers': headers, 'positions': positions}
+
+
+def validate_zip_size(archive):
+    if sum(info.file_size for info in archive.infolist()) > MAX_EXPANDED_BYTES:
+        raise ValueError('Expanded archive is too large')
 
 
 def extract_rebrickable_csvs(zip_path: str, dest_dir: str) -> dict[str, str]:
-    """
-    Extract colors.csv, parts.csv, and elements.csv from a Rebrickable ZIP.
-    Returns dict mapping type (colors/parts/elements) to file path.
-    """
-    found: dict[str, str] = {}
-    targets = {"colors.csv": "colors", "parts.csv": "parts", "elements.csv": "elements"}
-
-    with zipfile.ZipFile(zip_path) as z:
-        for zinfo in z.infolist():
-            base = os.path.basename(zinfo.filename).lower()
+    found = {}
+    targets = {'colors.csv': 'colors', 'parts.csv': 'parts', 'elements.csv': 'elements'}
+    with zipfile.ZipFile(zip_path) as archive:
+        validate_zip_size(archive)
+        for info in archive.infolist():
+            base = os.path.basename(info.filename).lower()
             if base in targets:
+                if targets[base] in found:
+                    raise ValueError(f'Duplicate dataset: {base}')
                 out = os.path.join(dest_dir, base)
-                with z.open(zinfo) as src, open(out, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                with archive.open(info) as source, open(out, 'wb') as destination:
+                    copy_bounded(source, destination)
                 found[targets[base]] = out
-
+    if not found:
+        raise ValueError('No colors.csv, parts.csv or elements.csv found')
     return found
 
 
-def read_csv_rows(path: str, offset: int, limit: int) -> Iterator[dict[str, Any]]:
-    """
-    Yield up to `limit` dict-rows from a CSV file starting at `offset`.
-    Works for both .csv and .csv.gz files.
-    """
-    opener = gzip.open if path.lower().endswith(".gz") else open
-    with opener(path, "rt", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        # Skip offset rows
-        for _ in range(offset):
-            try:
-                next(reader)
-            except StopIteration:
+def read_csv_rows(path: str, offset: int, limit: int, index: dict) -> Iterator[dict[str, Any]]:
+    """Seek near the batch start; immutable checkpoints also permit safe retries."""
+    if offset >= index['count']:
+        return
+    checkpoint = offset // 100
+    with open(path, "rt", encoding="utf-8-sig", newline="") as source:
+        source.seek(index['positions'][checkpoint])
+        reader = csv.DictReader(source, fieldnames=index['headers'])
+        for _ in range(offset % 100):
+            next(reader)
+        for _ in range(limit):
+            row = next(reader, None)
+            if row is None:
                 return
-        # Yield up to limit rows
-        for i, row in enumerate(reader):
-            if i >= limit:
-                break
             yield row
 
 
@@ -182,29 +209,34 @@ def rows_from_xlsx_bytes(raw: bytes) -> Iterator[dict[str, Any]]:
     """Parse XLSX bytes into dict rows (first sheet only)."""
     from openpyxl import load_workbook
 
+    with zipfile.ZipFile(BytesIO(raw)) as archive:
+        validate_zip_size(archive)
     wb = load_workbook(BytesIO(raw), read_only=True, data_only=True)
-    ws = wb.worksheets[0]
-    rows_iter = ws.iter_rows(values_only=True)
-
-    # Get headers
     try:
-        headers = [normalize_key(str(h) if h is not None else "") for h in next(rows_iter)]
-    except StopIteration:
-        return
+        ws = wb.worksheets[0]
+        rows_iter = ws.iter_rows(values_only=True)
 
-    # Parse data rows
-    for row in rows_iter:
-        if row is None or not any(row):
-            continue
+        # Get headers
+        try:
+            headers = [normalize_key(str(h) if h is not None else "") for h in next(rows_iter)]
+        except StopIteration:
+            return
 
-        data = {}
-        for i, header in enumerate(headers):
-            val = row[i] if i < len(row) else None
-            if isinstance(val, float) and val.is_integer():
-                val = int(val)
-            data[header] = val if val is not None else ""
+        # Parse data rows
+        for row in rows_iter:
+            if row is None or not any(row):
+                continue
 
-        yield data
+            data = {}
+            for i, header in enumerate(headers):
+                val = row[i] if i < len(row) else None
+                if isinstance(val, float) and val.is_integer():
+                    val = int(val)
+                data[header] = val if val is not None else ""
+
+            yield data
+    finally:
+        wb.close()
 
 
 def rows_from_xls_bytes(raw: bytes) -> Iterator[dict[str, Any]]:
@@ -297,7 +329,7 @@ def digits_if_suffix(token: str) -> str:
     return match.group(1) if match else token
 
 
-def fetch_rebrickable_part(token: str, api_key: str) -> tuple[dict | None, int]:
+def fetch_rebrickable_part(token: str, api_key: str, allow_request=None) -> tuple[dict | None, int]:
     """
     Fetch part info from Rebrickable API.
     Tries /lego/parts/{token}/, then /lego/parts/{digits}/ if token has suffix.
@@ -306,7 +338,9 @@ def fetch_rebrickable_part(token: str, api_key: str) -> tuple[dict | None, int]:
     headers = {"Authorization": f"key {api_key}"}
     attempts = 0
 
-    # Try exact token
+    # Each outbound request consumes the same budget, including suffix fallback.
+    if allow_request is not None and not allow_request():
+        return None, attempts
     try:
         response = requests.get(
             f"https://rebrickable.com/api/v3/lego/parts/{token}/",
@@ -322,6 +356,8 @@ def fetch_rebrickable_part(token: str, api_key: str) -> tuple[dict | None, int]:
     # Try digit-only variant if token has letter suffix
     digits = digits_if_suffix(token)
     if digits != token:
+        if allow_request is not None and not allow_request():
+            return None, attempts
         try:
             response = requests.get(
                 f"https://rebrickable.com/api/v3/lego/parts/{digits}/",
@@ -337,7 +373,7 @@ def fetch_rebrickable_part(token: str, api_key: str) -> tuple[dict | None, int]:
     return None, attempts
 
 
-def fetch_bricklink_name(token: str) -> str | None:
+def fetch_bricklink_name(token: str, allow_request=None) -> str | None:
     """
     Scrape part name from BrickLink catalog page.
     Returns sanitized name or None if not found.
@@ -345,6 +381,8 @@ def fetch_bricklink_name(token: str) -> str | None:
     from html import unescape
     import urllib.parse
 
+    if allow_request is not None and not allow_request():
+        return None
     url = f"https://www.bricklink.com/v2/catalog/catalogitem.page?P={urllib.parse.quote(token)}"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; BlockShelf/1.0)"}
 
@@ -462,14 +500,19 @@ def can_delete(viewer: User, owner: User) -> bool:
 # IP Address Helper
 # -------------------------------------------------------------------------------------------------
 
-def get_client_ip(request: HttpRequest) -> str:
-    """
-    Get client IP address from request.
-    Handles reverse proxy headers (X-Forwarded-For, X-Real-IP).
-    """
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-    if x_forwarded_for:
-        # Take the first IP in the chain (client IP)
-        return x_forwarded_for.split(',')[0].strip()
+from ..decorators.rate_limit import get_client_ip
 
-    return request.META.get('REMOTE_ADDR', '0.0.0.0')
+
+def search_inventory(items, query):
+    from django.db.models import Exists, OuterRef, Q
+    from ..models import RBElement
+    if not query:
+        return items
+    match = (Q(name__icontains=query) | Q(part_id__icontains=query)
+             | Q(color__icontains=query) | Q(storage_location__icontains=query))
+    if is_element_id(query):
+        elements = RBElement.objects.filter(
+            element_id=query, part_id=OuterRef('part_id'), color__name__iexact=OuterRef('color'))
+        items = items.annotate(matches_element=Exists(elements))
+        match |= Q(matches_element=True)
+    return items.filter(match)

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% load inventory_extras %}
 {% load qs %}
 
@@ -12,9 +13,9 @@
 {% with current_sort|default:"name" as cur_sort %}
 {% with current_dir|default:"asc" as cur_dir %}
 
-<form class="row g-2 mb-3" method="get" action=".">
+<form id="inventorySearch" class="row g-2 mb-3" method="get" action=".">
   <div class="col-sm-9 col-md-10">
-    <input type="text" class="form-control" name="q" value="{{ q }}" placeholder="Search by name, part id, color, location..." />
+    <input type="text" class="form-control" aria-label="Search inventory" aria-controls="inventoryResults" name="q" value="{{ q }}" placeholder="Search by name, part id, color, location..." />
     <input type="hidden" name="sort" value="{{ cur_sort }}">
     <input type="hidden" name="dir" value="{{ cur_dir }}">
   </div>
@@ -23,6 +24,8 @@
   </div>
 </form>
 
+<p id="inventorySearchStatus" class="text-muted small" role="status" aria-live="polite"></p>
+<div id="inventoryResults" data-owner="{{ owner.pk }}" data-count="{{ page_obj.paginator.count }}">
 <div class="table-responsive">
   <table class="table table-striped align-middle shadow-sm inventory-table">
     <colgroup>
@@ -37,13 +40,20 @@
 
     <thead class="table-blockshelf">
       <tr>
+        {% next_dir cur_sort cur_dir 'name' as sort_next %}
         <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='name' dir=sort_next page=None %}">Part / Name {% sort_icon cur_sort cur_dir 'name' %}</a></th>
+        {% next_dir cur_sort cur_dir 'part' as sort_next %}
         <th class="text-nowrap"><a class="sort-link" href="{{ request.path }}{% qs_replace sort='part' dir=sort_next page=None %}">Part ID {% sort_icon cur_sort cur_dir 'part' %}</a></th>
+        {% next_dir cur_sort cur_dir 'color' as sort_next %}
         <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='color' dir=sort_next page=None %}">Color {% sort_icon cur_sort cur_dir 'color' %}</a></th>
+        {% next_dir cur_sort cur_dir 'total' as sort_next %}
         <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='total' dir=sort_next page=None %}">Total {% sort_icon cur_sort cur_dir 'total' %}</a></th>
+        {% next_dir cur_sort cur_dir 'used' as sort_next %}
         <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='used' dir=sort_next page=None %}">Used {% sort_icon cur_sort cur_dir 'used' %}</a></th>
-        <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='available' dir=sort_next page=None %}">Available {% sort_icon cur_sort cur_dir 'available' %}</a></th>
-        <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='location' dir=sort_next page=None %}">Location {% sort_icon cur_sort cur_dir 'location' %}</a></th>
+        {% next_dir cur_sort cur_dir 'avail' as sort_next %}
+        <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='avail' dir=sort_next page=None %}">Available {% sort_icon cur_sort cur_dir 'avail' %}</a></th>
+        {% next_dir cur_sort cur_dir 'loc' as sort_next %}
+        <th><a class="sort-link" href="{{ request.path }}{% qs_replace sort='loc' dir=sort_next page=None %}">Location {% sort_icon cur_sort cur_dir 'loc' %}</a></th>
       </tr>
     </thead>
 
@@ -95,6 +105,7 @@
     {% endif %}
   </ul>
 </nav>
+</div>
 
 <!-- Same preview modal -->
 <div class="modal fade" id="imgPreviewModal" tabindex="-1" aria-labelledby="imgPreviewModalLabel" aria-hidden="true">
@@ -117,6 +128,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{% static 'js/inventory-search.js' %}" defer></script>
 <script>
 (function(){
   const modalEl = document.getElementById('imgPreviewModal');

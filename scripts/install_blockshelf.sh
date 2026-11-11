@@ -2,7 +2,13 @@
 # BlockShelf Interactive Installation Script
 # This will install BlockShelf from scratch with interactive configuration
 
-set -e
+set -euo pipefail
+REVISION="${1:-}"
+if [[ -z "$REVISION" ]]; then
+    echo 'Usage: sudo bash scripts/install_blockshelf.sh <tested-git-revision>' >&2
+    exit 1
+fi
+SETUP_EMAIL=no
 
 APP_DIR="/opt/blockshelf"
 APP_USER="blockshelf"
@@ -246,17 +252,19 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE blockshelf TO blocksh
 
 echo "→ Preparing application directory..."
 rm -rf $APP_DIR
-mkdir -p "$(dirname "$APP_DIR")"
+install -d -o "$APP_USER" -g "$APP_USER" -m 0755 "$APP_DIR"
 
 echo "→ Cloning repository..."
-sudo -u $APP_USER git clone https://github.com/DarkSmileee/BlockShelf.git $APP_DIR
+sudo -u "$APP_USER" git clone https://github.com/DarkSmileee/BlockShelf.git "$APP_DIR"
+sudo -u "$APP_USER" git -C "$APP_DIR" checkout --detach "$REVISION"
+sudo -u "$APP_USER" git -C "$APP_DIR" cat-file -e HEAD:requirements.lock
 
 echo "→ Creating virtual environment..."
 sudo -u $APP_USER python3 -m venv $APP_DIR/.venv
 
 echo "→ Installing Python dependencies..."
 sudo -u $APP_USER $APP_DIR/.venv/bin/pip install --upgrade pip
-sudo -u $APP_USER $APP_DIR/.venv/bin/pip install -r $APP_DIR/requirements.txt
+sudo -u $APP_USER $APP_DIR/.venv/bin/pip install -r $APP_DIR/requirements.lock
 
 echo "→ Setting up configuration..."
 mkdir -p /etc/blockshelf

@@ -24,3 +24,20 @@ staticfiles/
 *.code-workspace
 .DS_Store
 Thumbs.db
+
+# Runtime data, test output, and local release artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+logs/
+*.log
+private_backups/
+private_imports/
+*.sqlite3
+*.dump
+*.backup
+release-packages/
+pgtest-*/
+blockshelf_inventory/staging_test_settings.py
+blockshelf_inventory/rehearsal_settings.py

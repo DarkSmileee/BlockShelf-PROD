@@ -5,11 +5,13 @@ from django.contrib.auth import views as auth_views
 from inventory.views.auth import custom_login
 
 urlpatterns = [
+    path('admin/login/', custom_login, {'admin_login': True}, name='protected_admin_login'),
     path('admin/', admin.site.urls),
     # Auth routes (with rate limiting)
     path('login/', custom_login, name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     # allauth for social login
+    path('accounts/login/', custom_login, name='account_login'),
     path('accounts/', include('allauth.urls')),
     # App
     path('', RedirectView.as_view(pattern_name='inventory:list', permanent=False)),

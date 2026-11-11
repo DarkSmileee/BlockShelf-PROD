@@ -8,7 +8,7 @@ Usage:
     python manage.py create_backups --full-db --all-users
 """
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from inventory.backup_utils import (
     create_full_db_backup,
     create_all_user_backups,
@@ -41,6 +41,9 @@ class Command(BaseCommand):
         full_db = options['full_db']
         all_users = options['all_users']
         keep_count = options['keep']
+        if keep_count < 1:
+            raise CommandError('Keep at least one backup')
+        failed = False
 
         if not full_db and not all_users:
             self.stdout.write(
@@ -70,6 +73,7 @@ class Command(BaseCommand):
                         self.style.WARNING(f'  Deleted {deleted} old backup(s)')
                     )
             else:
+                failed = True
                 self.stdout.write(
                     self.style.ERROR('✗ Failed to create full DB backup')
                 )
@@ -78,7 +82,7 @@ class Command(BaseCommand):
         if all_users:
             self.stdout.write('Creating inventory backups for all users...')
             success_count, fail_count = create_all_user_backups(
-                created_by=None, is_scheduled=True
+                created_by=None, is_scheduled=True, keep_count=keep_count
             )
 
             if success_count > 0:
@@ -89,8 +93,11 @@ class Command(BaseCommand):
                 )
 
             if fail_count > 0:
+                failed = True
                 self.stdout.write(
                     self.style.ERROR(f'✗ Failed to create backups for {fail_count} user(s)')
                 )
 
+        if failed:
+            raise CommandError('One or more requested backups failed')
         self.stdout.write(self.style.SUCCESS('Backup process completed'))

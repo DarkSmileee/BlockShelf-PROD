@@ -114,7 +114,7 @@ class TestDuplicatePrevention:
         )
 
         # Try to create duplicate
-        with pytest.raises(IntegrityError) as exc_info:
+        with pytest.raises(ValidationError) as exc_info:
             InventoryItem.objects.create(
                 user=user,
                 name='Duplicate Item',
@@ -123,7 +123,8 @@ class TestDuplicatePrevention:
                 quantity_total=20
             )
 
-        assert 'unique_user_part_color' in str(exc_info.value)
+        assert '__all__' in exc_info.value.message_dict
+        assert InventoryItem.objects.filter(user=user, part_id='3001', color='Red').count() == 1
 
     def test_same_part_different_color_allowed(self, user):
         """Test that same part_id with different color is allowed."""

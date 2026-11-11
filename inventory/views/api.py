@@ -10,6 +10,7 @@ All endpoints return JSON responses and include comprehensive error handling.
 """
 
 import logging
+import gzip
 import os
 import shutil
 import time
@@ -46,9 +47,11 @@ from ..constants import (
     REBRICKABLE_MAX_ROWS,
 )
 from ..models import InventoryItem, RBColor, RBElement, RBPart
+from ..decorators.rate_limit import consume_rate_limit
 from ..utils import get_effective_config, sanitize_text, sanitize_url
 from .helpers import (
-    count_csv_rows,
+    index_csv_rows,
+    copy_bounded,
     create_temp_dir,
     digits_if_suffix,
     extract_element_id_from_url,
@@ -88,28 +91,12 @@ def _rate_limit_ok(user_id: int, request) -> bool:
 
     # Check user-based rate limit
     user_key = f"rl:lookup:user:{user_id}:{bucket}"
-    cache.add(user_key, 0, timeout=LOOKUP_WINDOW_SECONDS)
-    try:
-        user_current = cache.incr(user_key)
-    except ValueError:
-        cache.set(user_key, 1, LOOKUP_WINDOW_SECONDS)
-        user_current = 1
-
-    if user_current > LOOKUP_LIMIT_PER_MIN:
+    if not consume_rate_limit(user_key, LOOKUP_LIMIT_PER_MIN, LOOKUP_WINDOW_SECONDS):
         return False
-
-    # Check IP-based rate limit (if request is provided)
     if request:
         ip = get_client_ip(request)
         ip_key = f"rl:lookup:ip:{ip}:{bucket}"
-        cache.add(ip_key, 0, timeout=LOOKUP_WINDOW_SECONDS)
-        try:
-            ip_current = cache.incr(ip_key)
-        except ValueError:
-            cache.set(ip_key, 1, LOOKUP_WINDOW_SECONDS)
-            ip_current = 1
-
-        if ip_current > LOOKUP_LIMIT_PER_IP:
+        if not consume_rate_limit(ip_key, LOOKUP_LIMIT_PER_IP, LOOKUP_WINDOW_SECONDS):
             return False
 
     return True
@@ -149,6 +136,10 @@ def lookup_part(request) -> JsonResponse:
         - Successful lookups: 24 hours
         - Failed lookups: 5 minutes
     """
+    deadline = time.monotonic() + 15
+    def allow_request():
+        return time.monotonic() < deadline and _rate_limit_ok(request.user.id, request)
+
     raw = (request.GET.get('part_id') or '').strip()
     if not raw:
         return json_err('Missing part_id', 400)
@@ -180,7 +171,7 @@ def lookup_part(request) -> JsonResponse:
             img = (rbpart.image_url or '').strip()
 
             # Backfill part image once if missing
-            if not img and _rate_limit_ok(request.user.id, request) and api_key:
+            if not img and api_key and allow_request():
                 try:
                     r = requests.get(
                         f"https://rebrickable.com/api/v3/lego/parts/{rbpart.part_num}/",
@@ -206,7 +197,7 @@ def lookup_part(request) -> JsonResponse:
             return JsonResponse(data)
 
         # External API fallback: /lego/elements/{id}/
-        if not _rate_limit_ok(request.user.id, request):
+        if not allow_request():
             return json_err('Rate limit exceeded. Please try again later.', 429)
 
         try:
@@ -292,9 +283,9 @@ def lookup_part(request) -> JsonResponse:
                 name = name or (rb2.name or '')
                 img = img or (rb2.image_url or '')
 
-    if (not name or not img) and _rate_limit_ok(request.user.id, request) and api_key:
+    if (not name or not img) and api_key:
         try:
-            res, _attempts = fetch_rebrickable_part(token, api_key)
+            res, _attempts = fetch_rebrickable_part(token, api_key, allow_request)
             if res:
                 pn = res.get('part_num') or pn
                 name = name or sanitize_text((res.get('name') or ''))
@@ -306,11 +297,11 @@ def lookup_part(request) -> JsonResponse:
             logger.exception(f"Rebrickable API failed for part {token}")
 
     if not name:
-        bl_name = fetch_bricklink_name(token)
+        bl_name = fetch_bricklink_name(token, allow_request)
         if not bl_name:
             digits = digits_if_suffix(token)
             if digits != token:
-                bl_name = fetch_bricklink_name(digits)
+                bl_name = fetch_bricklink_name(digits, allow_request)
         if bl_name:
             name = bl_name
 
@@ -359,6 +350,8 @@ def reb_bootstrap_prepare(request) -> JsonResponse:
     if not request.user.is_staff:
         return HttpResponseForbidden("Admins only.")
 
+    temp_root = None
+    prepared = False
     try:
         upload = request.FILES.get("dataset_file")
         if not upload:
@@ -375,7 +368,7 @@ def reb_bootstrap_prepare(request) -> JsonResponse:
             return json_err("Invalid file type. Only ZIP, CSV, or CSV.GZ files allowed.", 400)
 
         temp_root = create_temp_dir()
-        src_path = os.path.join(temp_root, upload.name)
+        src_path = os.path.join(temp_root, os.path.basename(upload.name))
         with open(src_path, "wb") as dst:
             for chunk in upload.chunks():
                 dst.write(chunk)
@@ -400,23 +393,20 @@ def reb_bootstrap_prepare(request) -> JsonResponse:
                 shutil.rmtree(temp_root, ignore_errors=True)
                 return json_err("Unsupported file type.", 400)
 
+        for kind, path in list(files.items()):
+            if path.lower().endswith('.gz'):
+                expanded = path[:-3]
+                with gzip.open(path, 'rb') as source, open(expanded, 'wb') as destination:
+                    copy_bounded(source, destination)
+                os.remove(path)
+                files[kind] = expanded
+
         totals: dict[str, int] = {}
+        indexes = {}
         max_rows = getattr(settings, 'REBRICKABLE_MAX_ROWS', REBRICKABLE_MAX_ROWS)
         for kind, path in files.items():
-            try:
-                row_count = count_csv_rows(path)
-                # SECURITY: Validate row count to prevent DoS
-                if row_count > max_rows:
-                    shutil.rmtree(temp_root, ignore_errors=True)
-                    return json_err(
-                        f"File '{kind}' contains too many rows ({row_count}). "
-                        f"Maximum allowed is {max_rows}.",
-                        400
-                    )
-                totals[kind] = row_count
-            except Exception:
-                logger.exception(f"Failed to count rows in {kind}")
-                totals[kind] = 0
+            indexes[kind] = index_csv_rows(path, max_rows)
+            totals[kind] = indexes[kind]['count']
 
         job_id = get_random_string(12)
         cache.set(
@@ -425,13 +415,20 @@ def reb_bootstrap_prepare(request) -> JsonResponse:
                 "root": temp_root,
                 "files": files,
                 "totals": totals,
+                "indexes": indexes,
             },
             REBRICKABLE_JOB_CACHE_TTL,
         )
+        prepared = True
         return json_ok(job=job_id, totals=totals)
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        return json_err(str(exc), 400)
     except Exception:
         logger.exception("reb_bootstrap_prepare failed")
-        return json_err(traceback.format_exc(), 500)
+        return json_err("Unable to prepare import", 500)
+    finally:
+        if temp_root and not prepared:
+            shutil.rmtree(temp_root, ignore_errors=True)
 
 
 @login_required
@@ -476,7 +473,7 @@ def reb_bootstrap_run(request) -> JsonResponse:
     try:
         job = (request.POST.get("job") or "").strip()
         kind = (request.POST.get("kind") or "").strip().lower()
-        offset = to_int(request.POST.get("offset", "0"), 0)
+        offset = max(0, to_int(request.POST.get("offset", "0"), 0))
         batch_size = to_int(
             request.POST.get("batch_size", str(REBRICKABLE_BATCH_SIZE_DEFAULT)),
             REBRICKABLE_BATCH_SIZE_DEFAULT
@@ -566,7 +563,7 @@ def reb_bootstrap_run(request) -> JsonResponse:
         # Process a slice in a transaction
         try:
             with transaction.atomic():
-                for row in read_csv_rows(path, offset, batch_size):
+                for row in read_csv_rows(path, offset, batch_size, meta['indexes'][kind]):
                     if kind == "colors":
                         upsert_color(row)
                     elif kind == "parts":
@@ -578,10 +575,22 @@ def reb_bootstrap_run(request) -> JsonResponse:
                     processed += 1
         except Exception as e:
             logger.exception(f"Batch parse/save error for {kind} at offset {offset}")
-            messages_log.append(f"Batch parse/save error: {e}")
+            return JsonResponse({'ok': False, 'error': 'Batch failed; no rows in this batch were saved.', 'offset': offset}, status=400)
 
         new_offset = offset + processed
         done = new_offset >= total
+        if done:
+            completed = set(meta.get('completed', [])) | {kind}
+            meta['completed'] = list(completed)
+            if all(k in completed or not count for k, count in totals.items()):
+                shutil.rmtree(meta['root'], ignore_errors=True)
+                cache.delete(jobkey)
+            else:
+                cache.set(jobkey, meta, REBRICKABLE_JOB_CACHE_TTL)
+                os.utime(meta['root'], None)
+        else:
+            cache.set(jobkey, meta, REBRICKABLE_JOB_CACHE_TTL)
+            os.utime(meta['root'], None)
 
         return json_ok(
             done=done,
@@ -728,8 +737,22 @@ def bulk_update_missing_batch(request) -> JsonResponse:
         messages_log: list[str] = []
 
         processed_eligible = 0
+        deadline = time.monotonic() + 15
+        retry_after = 0
+        def allow_request():
+            nonlocal retry_after
+            if time.monotonic() >= deadline:
+                retry_after = 1
+                return False
+            if not _rate_limit_ok(request.user.id, request):
+                retry_after = LOOKUP_WINDOW_SECONDS - int(time.time()) % LOOKUP_WINDOW_SECONDS + 1
+                return False
+            return True
 
         for item in items:
+            if time.monotonic() >= deadline:
+                break
+            previous_id = last_id
             last_id = item.id
 
             need_name = (item.name or "").strip().lower() == "unknown"
@@ -761,9 +784,9 @@ def bulk_update_missing_batch(request) -> JsonResponse:
                         part_name = part_name or (rb2.name or "").strip()
                         part_img  = part_img  or (rb2.image_url or "").strip()
 
-            if ((need_name and not part_name) or (need_img and not part_img)) and api_key and _rate_limit_ok(request.user.id, request):
+            if ((need_name and not part_name) or (need_img and not part_img)) and api_key:
                 try:
-                    res, attempts = fetch_rebrickable_part(token, api_key)
+                    res, attempts = fetch_rebrickable_part(token, api_key, allow_request)
                     api_calls += attempts
                     if res:
                         pn = res.get("part_num") or token
@@ -779,26 +802,31 @@ def bulk_update_missing_batch(request) -> JsonResponse:
 
             used_bricklink = False
             if need_name and not part_name:
-                bl_name = fetch_bricklink_name(token)
+                bl_name = fetch_bricklink_name(token, allow_request)
                 if not bl_name:
                     digits = digits_if_suffix(token)
                     if digits != token:
-                        bl_name = fetch_bricklink_name(digits)
+                        bl_name = fetch_bricklink_name(digits, allow_request)
                 if bl_name:
                     part_name = bl_name
                     used_bricklink = True
                     messages_log.append(
                         f"BrickLink fallback: #{item.id} part '{token}' → name='{bl_name}'. No image/buy available."
                     )
-                else:
+                elif not retry_after:
                     messages_log.append(
                         f"Not found on Rebrickable and BrickLink: #{item.id} part '{token}'."
                     )
 
+            if retry_after:
+                last_id = previous_id
+                processed_eligible -= 1
+                messages_log.append("Lookup paused; this item will be retried.")
+                break
+
             changed = False
             if need_name and part_name:
                 item.name = part_name
-                updated_names += 1
                 changed = True
                 if used_bricklink:
                     messages_log.append(f"Updated name via BrickLink: #{item.id} '{token}' → '{part_name}'")
@@ -807,17 +835,31 @@ def bulk_update_missing_batch(request) -> JsonResponse:
 
             if need_img and part_img:
                 item.image_url = part_img
-                updated_images += 1
                 changed = True
                 messages_log.append(f"Updated image from Rebrickable: #{item.id} '{token}'")
 
             if changed:
-                item.save()
+                # Lock only while saving, after network I/O; preserve validation and audit signals.
+                with transaction.atomic():
+                    current = InventoryItem.objects.select_for_update().filter(pk=item.pk).first()
+                    fields = []
+                    if current is not None and current.part_id == item.part_id:
+                        if need_name and part_name and current.name.strip().lower() == 'unknown':
+                            current.name = part_name
+                            fields.append('name')
+                        if need_img and part_img and not current.image_url.strip():
+                            current.image_url = part_img
+                            fields.append('image_url')
+                        if fields:
+                            current.save(update_fields=fields + ['updated_at'])
+                            updated_names += int('name' in fields)
+                            updated_images += int('image_url' in fields)
             else:
                 skipped += 1
 
         return JsonResponse({
             "done": False,
+            "retry_after": retry_after,
             "last_id": last_id,
             "processed": processed_eligible,
             "updated_names": updated_names,

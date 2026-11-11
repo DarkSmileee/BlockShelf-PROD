@@ -10,13 +10,15 @@ from django.contrib import messages
 from django.contrib.auth import login as auth_login, authenticate
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
-from django.http import HttpRequest, HttpResponse, JsonResponse
-from django.shortcuts import redirect, render
+from django.http import HttpRequest, HttpResponse, JsonResponse, HttpResponseForbidden
+from allauth.account.utils import perform_login
+from django.shortcuts import redirect, render, resolve_url
 from django.views.decorators.http import require_POST, require_http_methods
 from django.views.decorators.cache import never_cache
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import csrf_protect
 
-from ..models import UserPreference, LoginAttempt
+from ..models import LoginAttempt
 from ..turnstile import turnstile_is_enabled, verify_turnstile_token
 from ..utils import get_effective_config
 from ..decorators.rate_limit import rate_limit, reset_rate_limit, get_client_ip
@@ -32,12 +34,14 @@ logger = logging.getLogger(__name__)
     window=getattr(settings, 'RATE_LIMIT_LOGIN_WINDOW', 900),
     key_prefix='login'
 )
-def custom_login(request: HttpRequest) -> HttpResponse:
+def custom_login(request: HttpRequest, admin_login=False) -> HttpResponse:
     """
     Custom login view with rate limiting and account lockout.
     Replaces Django's default LoginView.
     """
     if request.user.is_authenticated:
+        if admin_login:
+            return redirect('admin:index') if request.user.is_staff else HttpResponseForbidden('Staff access required.')
         return redirect(settings.LOGIN_REDIRECT_URL)
 
     # Get client info
@@ -96,26 +100,19 @@ def custom_login(request: HttpRequest) -> HttpResponse:
                 )
 
         if form.is_valid():
-            password = form.cleaned_data.get('password')
-            user = authenticate(username=username, password=password)
-
-            if user is not None:
-                # Record successful login
-                LoginAttempt.record_attempt(
-                    username=username,
-                    ip_address=client_ip,
-                    success=True,
-                    user_agent=user_agent
-                )
-
-                auth_login(request, user)
-                # Reset rate limit on successful login
+            user = form.get_user()
+            if admin_login and not user.is_staff:
+                form.add_error(None, "Staff access required.")
+                return render(request, 'registration/login.html', {'form': form}, status=403)
+            next_url = request.POST.get('next') or request.GET.get('next', '')
+            if not url_has_allowed_host_and_scheme(next_url, {request.get_host()}, require_https=request.is_secure()):
+                next_url = '/admin/' if admin_login else resolve_url(settings.LOGIN_REDIRECT_URL)
+            response = perform_login(request, user, redirect_url=next_url)
+            if request.user.is_authenticated:
+                LoginAttempt.record_attempt(username=user.username, ip_address=client_ip,
+                                            success=True, user_agent=user_agent)
                 reset_rate_limit(request, 'login')
-                logger.info(f"User {username} logged in successfully from {client_ip}")
-
-                # Redirect to next or default
-                next_url = request.GET.get('next', settings.LOGIN_REDIRECT_URL)
-                return redirect(next_url)
+            return response
         else:
             # Record failed login attempt
             LoginAttempt.record_attempt(
@@ -194,7 +191,7 @@ def signup(request: HttpRequest) -> HttpResponse:
 def set_theme(request: HttpRequest) -> JsonResponse:
     """
     Set user's theme preference (light, dark, or system).
-    Stores in cookie and database (if authenticated).
+    Stores in the browser cookie, matching the existing theme toggle.
     """
     try:
         theme = request.POST.get("theme")
@@ -204,13 +201,6 @@ def set_theme(request: HttpRequest) -> JsonResponse:
 
         response = JsonResponse({"ok": True, "theme": theme})
         response.set_cookie("theme", theme, max_age=60 * 60 * 24 * 365, samesite="Lax")
-
-        # Save to database if user is authenticated
-        if request.user.is_authenticated:
-            prefs, _ = UserPreference.objects.get_or_create(user=request.user)
-            prefs.theme = theme
-            prefs.save(update_fields=["theme"])
-            logger.debug(f"User {request.user.username} changed theme to {theme}")
 
         return response
 

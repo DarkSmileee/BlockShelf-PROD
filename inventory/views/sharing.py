@@ -4,12 +4,14 @@ Handles public share links and collaborator invitations.
 """
 
 import logging
+from django.db import transaction
+from django.views.decorators.http import require_http_methods
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.db.models import ExpressionWrapper, F, IntegerField, Q
-from django.http import HttpRequest, HttpResponse, HttpResponseForbidden
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.crypto import get_random_string
@@ -19,6 +21,8 @@ from ..constants import PUBLIC_SHARE_ITEMS_PER_PAGE
 from ..forms import InviteCollaboratorForm
 from ..models import InventoryCollab, InventoryItem, InventoryShare, User
 from ..utils import get_effective_config
+
+from .helpers import search_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +34,11 @@ def create_share_link(request: HttpRequest) -> HttpResponse:
         return HttpResponseForbidden("POST required")
 
     try:
-        token = get_random_string(32)
-        InventoryShare.objects.update_or_create(
-            user=request.user,
-            is_active=True,
-            defaults={"token": token}
-        )
+        with transaction.atomic():
+            User.objects.select_for_update().get(pk=request.user.pk)
+            for share in InventoryShare.objects.filter(user=request.user, is_active=True):
+                share.revoke()
+            InventoryShare.objects.create(user=request.user)
         messages.success(request, "Share link created successfully.")
 
     except Exception as e:
@@ -70,15 +73,11 @@ def shared_inventory(request: HttpRequest, token: str) -> HttpResponse:
     try:
         share = get_object_or_404(InventoryShare, token=token, is_active=True)
 
-        # Check if share link has expired
-        if share.is_expired():
-            share.revoke()
+        if not share.record_access():
             return render(request, "inventory/share_expired.html", {
                 "owner": share.user,
             }, status=410)
 
-        # Track access
-        share.record_access()
         owner = share.user
 
         # Get query parameters
@@ -89,13 +88,7 @@ def shared_inventory(request: HttpRequest, token: str) -> HttpResponse:
         # Build queryset
         items = InventoryItem.objects.filter(user=owner)
 
-        if query:
-            items = items.filter(
-                Q(name__icontains=query)
-                | Q(part_id__icontains=query)
-                | Q(color__icontains=query)
-                | Q(storage_location__icontains=query)
-            )
+        items = search_inventory(items, query)
 
         # Add calculated field for available quantity
         items = items.annotate(
@@ -124,7 +117,7 @@ def shared_inventory(request: HttpRequest, token: str) -> HttpResponse:
         # Pagination
         config = get_effective_config()
         per_page = getattr(config, "items_per_page", PUBLIC_SHARE_ITEMS_PER_PAGE) or PUBLIC_SHARE_ITEMS_PER_PAGE
-        paginator = Paginator(items, per_page)
+        paginator = Paginator(items, max(5, min(500, per_page)))
         page_obj = paginator.get_page(request.GET.get("page"))
 
         return render(request, "inventory/shared_inventory.html", {
@@ -137,6 +130,11 @@ def shared_inventory(request: HttpRequest, token: str) -> HttpResponse:
             "read_only": True,
         })
 
+    except Http404:
+        return render(request, "inventory/share_unavailable.html", {
+            "title": "Share unavailable",
+            "subtitle": "This link does not exist or has been revoked.",
+        }, status=404)
     except Exception as e:
         logger.exception("Error in shared_inventory view")
         return render(request, "errors/500.html", status=500)
@@ -145,24 +143,7 @@ def shared_inventory(request: HttpRequest, token: str) -> HttpResponse:
 @login_required
 def inventory_switcher(request: HttpRequest) -> HttpResponse:
     """Display inventory switcher for collaborations."""
-    try:
-        my_inv = request.user
-        collabs = (
-            InventoryCollab.objects
-            .filter(collaborator=request.user, is_active=True, accepted_at__isnull=False)
-            .select_related("owner")
-            .order_by("owner__username")
-        )
-
-        return render(request, "inventory/inventory_switcher.html", {
-            "my_inv": my_inv,
-            "collabs": collabs,
-        })
-
-    except Exception as e:
-        logger.exception("Error in inventory_switcher view")
-        messages.error(request, f"An error occurred: {str(e)}")
-        return redirect("inventory:list")
+    return redirect('inventory:list')
 
 
 @login_required
@@ -224,6 +205,7 @@ def create_invite(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+@require_POST
 def revoke_invite(request: HttpRequest, pk: int) -> HttpResponse:
     """Revoke a collaborator invitation."""
     try:
@@ -238,10 +220,12 @@ def revoke_invite(request: HttpRequest, pk: int) -> HttpResponse:
     return redirect(f"{reverse('inventory:settings')}?tab=invite")
 
 
+@require_http_methods(["GET", "POST"])
+@transaction.atomic
 def accept_invite(request: HttpRequest, token: str) -> HttpResponse:
     """Accept a collaborator invitation."""
     try:
-        invite = get_object_or_404(InventoryCollab, token=token, is_active=True)
+        invite = get_object_or_404(InventoryCollab.objects.select_for_update(), token=token, is_active=True)
 
         # If already accepted, redirect to inventory
         if invite.accepted_at:
@@ -252,6 +236,11 @@ def accept_invite(request: HttpRequest, token: str) -> HttpResponse:
         # Must be logged in to accept
         if not request.user.is_authenticated:
             return redirect(reverse("login") + f"?next={request.path}")
+
+        if invite.collaborator_id != request.user.pk:
+            return HttpResponseForbidden("This invitation belongs to another account.")
+        if request.method == 'GET':
+            return render(request, 'inventory/invite_confirm.html', {'invite': invite})
 
         # Cannot accept own invite
         if request.user == invite.owner:

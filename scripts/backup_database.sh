@@ -87,8 +87,8 @@ backup_sqlite() {
             return 1
         }
     else
-        # Fallback to simple copy (less safe but works)
-        cp "$db_path" "$backup_file"
+        log_error "sqlite3 is required for a consistent SQLite backup"
+        return 1
     fi
 
     # Compress the backup
@@ -124,7 +124,7 @@ backup_postgres() {
     fi
 
     # Parse DATABASE_URL
-    local db_url="$DATABASE_URL"
+    local db_url="${DATABASE_URL/postgresql:/postgres:}"
 
     # Extract components using regex
     if [[ $db_url =~ postgres://([^:]+):([^@]+)@([^:]+):([0-9]+)/(.+) ]]; then
@@ -236,29 +236,29 @@ main() {
     case "$mode" in
         sqlite)
             if backup_sqlite; then
-                ((success++))
+                success=$((success + 1))
             else
-                ((failed++))
+                failed=$((failed + 1))
             fi
             ;;
         postgres)
             if backup_postgres; then
-                ((success++))
+                success=$((success + 1))
             else
-                ((failed++))
+                failed=$((failed + 1))
             fi
             ;;
         both)
             if backup_sqlite; then
-                ((success++))
+                success=$((success + 1))
             else
-                ((failed++))
+                failed=$((failed + 1))
             fi
 
             if backup_postgres; then
-                ((success++))
+                success=$((success + 1))
             else
-                ((failed++))
+                failed=$((failed + 1))
             fi
             ;;
         *)

@@ -160,6 +160,9 @@ WHITENOISE_MAX_AGE = env.int("WHITENOISE_MAX_AGE", default=60 * 60 * 24 * 7)  # 
 # --------------------------------------------------------------------------------------
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+BACKUP_ROOT = Path(env("BACKUP_ROOT", default=str(BASE_DIR / "private_backups")))
+REBRICKABLE_TEMP_ROOT = Path(env("REBRICKABLE_TEMP_ROOT", default=str(BASE_DIR / "private_imports")))
+TRUSTED_PROXY_IPS = env.list("TRUSTED_PROXY_IPS", default=["127.0.0.1", "::1"])
 
 # --------------------------------------------------------------------------------------
 # Default primary key field type
@@ -319,7 +322,7 @@ MAX_UPLOAD_SIZE = env.int("MAX_UPLOAD_SIZE", default=50 * 1024 * 1024)  # 50MB f
 # --------------------------------------------------------------------------------------
 # File Upload Security - ClamAV Integration (Optional)
 # --------------------------------------------------------------------------------------
-ENABLE_CLAMAV_SCAN = env.bool("ENABLE_CLAMAV_SCAN", default=False)  # Requires ClamAV installation
+
 
 # --------------------------------------------------------------------------------------
 # Email
@@ -329,6 +332,13 @@ EMAIL_BACKEND = env(
     default="django.core.mail.backends.console.EmailBackend",
 )
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="noreply@example.com")
+EMAIL_HOST = env("EMAIL_HOST", default="localhost")
+EMAIL_PORT = env.int("EMAIL_PORT", default=25)
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
+EMAIL_TIMEOUT = env.int("EMAIL_TIMEOUT", default=10)
 
 # Add your app context processor
 TEMPLATES[0]["OPTIONS"]["context_processors"].append(
@@ -387,3 +397,6 @@ if SENTRY_DSN:
         # Before send callback to filter sensitive data
         before_send=lambda event, hint: event if not DEBUG else None,
     )
+
+# Confirm a replacement address before retiring the previous recovery address.
+ACCOUNT_CHANGE_EMAIL = True

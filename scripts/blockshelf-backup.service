@@ -8,6 +8,8 @@ User=blockshelf
 Group=blockshelf
 WorkingDirectory=/opt/blockshelf
 ExecStartPre=/bin/ln -sf /etc/blockshelf/.env /opt/blockshelf/.env
+ExecStartPre=-/opt/blockshelf/.venv/bin/python manage.py cleanup_imports
+ExecStartPre=-/opt/blockshelf/.venv/bin/python manage.py cleanup_rate_limits
 ExecStart=/opt/blockshelf/.venv/bin/python manage.py create_backups --full-db --all-users --keep 10
 
 # Security settings

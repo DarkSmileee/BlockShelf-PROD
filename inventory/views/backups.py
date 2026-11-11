@@ -18,6 +18,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_http_methods, require_POST
 
 from ..backup_utils import (
+    backup_file_path,
     create_all_user_backups,
     create_full_db_backup,
     create_user_inventory_backup,
@@ -120,7 +121,7 @@ def download_backup(request: HttpRequest, backup_id: int) -> HttpResponse:
             raise Http404("Backup not found")
 
     # Build file path
-    file_path = os.path.join(settings.MEDIA_ROOT, backup.file_path)
+    file_path = backup_file_path(backup.file_path)
 
     if not os.path.exists(file_path):
         messages.error(request, 'Backup file not found on disk.')

@@ -42,7 +42,7 @@ class TestHealthChecks:
         assert data['checks']['database']['status'] == 'ok'
         assert 'latency_ms' in data['checks']['database']
 
-    def test_health_check_no_auth_required(self, client):
+    def test_health_check_no_auth_required(self, client, db):
         """Test that health checks don't require authentication."""
         # Liveness
         response = client.get(reverse('inventory:liveness'))

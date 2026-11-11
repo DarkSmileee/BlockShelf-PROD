@@ -13,7 +13,7 @@ auditlog.register(get_user_model(), exclude_fields=['password', 'last_login'])
 auditlog.register(InventoryItem, exclude_fields=['created_at', 'updated_at'])
 auditlog.register(InventoryCollab, exclude_fields=['created_at'])
 auditlog.register(InventoryShare, exclude_fields=['created_at'])
-auditlog.register(UserPreference)
+auditlog.register(UserPreference, exclude_fields=["rebrickable_api_key"])
 auditlog.register(AppConfig)
 
 @admin.register(InventoryItem)

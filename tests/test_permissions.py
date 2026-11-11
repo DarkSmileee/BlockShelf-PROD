@@ -1,9 +1,10 @@
+from django.utils import timezone
 """
 Tests for sharing and collaboration permissions.
 """
 import pytest
 from django.urls import reverse
-from inventory.models import InventoryItem, InventoryCollab, ShareLink
+from inventory.models import InventoryItem, InventoryCollab, InventoryShare
 
 pytestmark = pytest.mark.permissions
 
@@ -20,12 +21,12 @@ class TestSharingPermissions:
         assert response.status_code == 302  # Redirect to settings
 
         # Verify link was created
-        assert ShareLink.objects.filter(user=user).exists()
+        assert InventoryShare.objects.filter(user=user).exists()
 
     def test_access_shared_inventory(self, client, user):
         """Test accessing inventory via share link."""
         # Create share link
-        share_link = ShareLink.objects.create(user=user)
+        share_link = InventoryShare.objects.create(user=user)
 
         # Create some items
         InventoryItem.objects.create(
@@ -46,7 +47,7 @@ class TestSharingPermissions:
     def test_cannot_edit_via_share_link(self, client, user):
         """Test that share links are read-only."""
         # Create share link
-        share_link = ShareLink.objects.create(user=user)
+        share_link = InventoryShare.objects.create(user=user)
 
         # Try to access add item page (should not work)
         response = client.get(reverse('inventory:add'))
@@ -56,7 +57,7 @@ class TestSharingPermissions:
     def test_revoke_share_link(self, authenticated_client, user):
         """Test revoking a share link."""
         # Create share link
-        share_link = ShareLink.objects.create(user=user)
+        share_link = InventoryShare.objects.create(user=user)
         token = share_link.token
 
         # Revoke it
@@ -66,7 +67,7 @@ class TestSharingPermissions:
         assert response.status_code == 302
 
         # Link should be deleted
-        assert not ShareLink.objects.filter(token=token).exists()
+        assert not InventoryShare.objects.get(token=token).is_active
 
 
 class TestCollaborationPermissions:
@@ -77,7 +78,7 @@ class TestCollaborationPermissions:
         response = authenticated_client.post(
             reverse('inventory:create_invite'),
             {
-                'collaborator_username': other_user.username,
+                'username': other_user.username,
                 'can_edit': True
             }
         )
@@ -90,7 +91,7 @@ class TestCollaborationPermissions:
             collaborator=other_user
         )
         assert invite.can_edit is True
-        assert not invite.is_active  # Not active until accepted
+        assert invite.accepted_at is None
 
     def test_accept_invite(self, authenticated_client, user, other_user):
         """Test accepting a collaboration invite."""
@@ -102,7 +103,7 @@ class TestCollaborationPermissions:
         )
 
         # Accept invite
-        response = authenticated_client.get(
+        response = authenticated_client.post(
             reverse('inventory:accept_invite', kwargs={'token': invite.token})
         )
         assert response.status_code == 302
@@ -121,7 +122,7 @@ class TestCollaborationPermissions:
             owner=other_user,
             collaborator=user,
             can_edit=False,
-            is_active=True
+            is_active=True, accepted_at=timezone.now()
         )
 
         # Create item for owner
@@ -134,7 +135,7 @@ class TestCollaborationPermissions:
         )
 
         # Collaborator should see it in inventory switcher
-        response = authenticated_client.get(reverse('inventory:inventory_switcher'))
+        response = authenticated_client.get(reverse('inventory:inventory_switcher'), follow=True)
         assert response.status_code == 200
         assert 'otheruser' in response.content.decode()
 
@@ -147,7 +148,7 @@ class TestCollaborationPermissions:
             owner=other_user,
             collaborator=user,
             can_edit=True,
-            is_active=True
+            is_active=True, accepted_at=timezone.now()
         )
 
         # Create item for owner
@@ -179,7 +180,7 @@ class TestCollaborationPermissions:
             owner=other_user,
             collaborator=user,
             can_edit=False,
-            is_active=True
+            is_active=True, accepted_at=timezone.now()
         )
 
         # Create item for owner
@@ -210,7 +211,7 @@ class TestCollaborationPermissions:
             owner=user,
             collaborator=other_user,
             can_edit=True,
-            is_active=True
+            is_active=True, accepted_at=timezone.now()
         )
 
         # Revoke it

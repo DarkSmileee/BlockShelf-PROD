@@ -5,7 +5,7 @@ All settings can be overridden via environment variables for flexibility
 across different deployment environments (development, staging, production).
 
 Environment Variables:
-    GUNICORN_BIND - Bind address (default: unix socket)
+    GUNICORN_BIND - Bind address (default: loopback TCP)
     GUNICORN_WORKERS - Number of worker processes (default: CPU * 2 + 1)
     GUNICORN_WORKER_CLASS - Worker class (default: sync)
     GUNICORN_TIMEOUT - Worker timeout in seconds (default: 60)
@@ -43,7 +43,7 @@ def get_env_str(key: str, default: str) -> str:
 # Examples:
 #   TCP: 0.0.0.0:8000 or 127.0.0.1:8000
 #   Unix: unix:/run/blockshelf/blockshelf.sock
-bind = get_env_str('GUNICORN_BIND', 'unix:/run/blockshelf/blockshelf.sock')
+bind = get_env_str('GUNICORN_BIND', '127.0.0.1:8000')
 
 # Backlog - number of pending connections
 backlog = get_env_int('GUNICORN_BACKLOG', 2048)

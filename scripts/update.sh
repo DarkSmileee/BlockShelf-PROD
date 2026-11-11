@@ -1,116 +1,77 @@
 #!/bin/bash
-# BlockShelf Update Script
-# Updates an existing BlockShelf installation while preserving data
-
-set -e
-
-APP_DIR="/opt/blockshelf"
-APP_USER="blockshelf"
-SERVICE_NAME="blockshelf"
-ENV_FILE="/etc/blockshelf/.env"
-
-echo "╔════════════════════════════════════════╗"
-echo "║      BlockShelf Update Script          ║"
-echo "╚════════════════════════════════════════╝"
-echo ""
-
-# Check if running as root
-if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ This script must be run as root (use sudo)"
+# Deploy an explicitly selected, tested revision. Never discard local edits.
+set -euo pipefail
+umask 077
+APP_DIR=/opt/blockshelf
+APP_USER=blockshelf
+ENV_FILE=/etc/blockshelf/.env
+REVISION="${1:-}"
+if [[ $(id -u) -ne 0 || -z "$REVISION" ]]; then
+    echo 'Usage: sudo bash scripts/update.sh <tested-git-revision>' >&2
     exit 1
 fi
-
-# Check if installation exists
-if [ ! -d "$APP_DIR" ]; then
-    echo "❌ BlockShelf not found at $APP_DIR"
-    echo "   Run the install script first:"
-    echo "   curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf/main/scripts/install_blockshelf.sh | sudo bash"
-    exit 1
+cd "$APP_DIR"
+exec 9>/var/lock/blockshelf-update.lock
+flock -n 9 || { echo 'Another update is running' >&2; exit 1; }
+[[ -f "$ENV_FILE" && -x .venv/bin/python && -r .env ]] || {
+    echo "Missing runtime or .env; check the link to $ENV_FILE before updating." >&2; exit 1;
+}
+[[ -z $(sudo -u "$APP_USER" git status --porcelain --untracked-files=no) ]] || {
+    echo 'Local tracked changes exist. Commit or preserve them before updating.' >&2; exit 1;
+}
+sudo -u "$APP_USER" git fetch origin
+TARGET=$(sudo -u "$APP_USER" git rev-parse --verify "$REVISION^{commit}")
+OLD=$(sudo -u "$APP_USER" git rev-parse HEAD)
+sudo -u "$APP_USER" git cat-file -e "$TARGET:requirements.lock"
+BACKUP_DIR=$(mktemp -d /var/backups/blockshelf-update-XXXXXXXX)
+chmod 700 "$BACKUP_DIR"
+printf '%s\n' "$OLD" > "$BACKUP_DIR/revision.txt"
+.venv/bin/python -m pip freeze > "$BACKUP_DIR/requirements.txt"
+# Stop HTTP writes and the scheduled writer before taking the final snapshot.
+TIMER_WAS_ACTIVE=0
+if systemctl is-active --quiet blockshelf-backup.timer; then
+    TIMER_WAS_ACTIVE=1
 fi
-
-if [ ! -f "$ENV_FILE" ]; then
-    echo "❌ Configuration file not found at $ENV_FILE"
-    exit 1
+trap 'systemctl stop blockshelf || true; echo "Update failed; service remains stopped. Recovery files (verify completeness): $BACKUP_DIR; old revision: $OLD. Follow docs/AUDIT_FIXES.md." >&2' ERR
+for unit in blockshelf-backup.timer blockshelf-backup.service; do
+    load_state=$(systemctl show "$unit" --property=LoadState --value)
+    if [[ "$load_state" != not-found ]]; then
+        systemctl stop "$unit"
+    fi
+done
+systemctl stop blockshelf
+# The application command must return nonzero when the dump fails.
+DB_BACKUP=$(sudo -u "$APP_USER" .venv/bin/python manage.py shell --verbosity 0 -c "from inventory.backup_utils import create_full_db_backup; from django.conf import settings; from pathlib import Path; backup = create_full_db_backup(); assert backup is not None, 'Database backup failed'; print(Path(getattr(settings, 'BACKUP_ROOT', settings.MEDIA_ROOT)) / backup.file_path)")
+[[ -s "$DB_BACKUP" ]]
+if [[ $(head -c 5 "$DB_BACKUP") == PGDMP ]]; then
+    pg_restore --list "$DB_BACKUP" >/dev/null
 fi
-
-echo "→ Stopping BlockShelf service..."
-systemctl stop $SERVICE_NAME
-
-echo "→ Backing up current installation..."
-BACKUP_DIR="/var/backups/blockshelf"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-mkdir -p $BACKUP_DIR
-tar -czf "$BACKUP_DIR/blockshelf_pre_update_$TIMESTAMP.tar.gz" \
-    -C $APP_DIR \
-    --exclude='.venv' \
-    --exclude='__pycache__' \
-    --exclude='*.pyc' \
-    --exclude='staticfiles' \
-    --exclude='media' \
-    . 2>/dev/null || true
-echo "   Backup saved to: $BACKUP_DIR/blockshelf_pre_update_$TIMESTAMP.tar.gz"
-
-echo "→ Pulling latest code from GitHub..."
-cd $APP_DIR
-sudo -u $APP_USER git fetch origin
-sudo -u $APP_USER git reset --hard origin/main
-
-echo "→ Cleaning Python bytecode cache..."
-sudo -u $APP_USER find "$APP_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-sudo -u $APP_USER find "$APP_DIR" -name "*.pyc" -delete 2>/dev/null || true
-
-echo "→ Installing/updating Python dependencies..."
-sudo -u $APP_USER $APP_DIR/.venv/bin/pip install --upgrade pip
-sudo -u $APP_USER $APP_DIR/.venv/bin/pip install -r $APP_DIR/requirements.txt --upgrade
-
-echo "→ Running database migrations..."
-sudo -u $APP_USER bash -c "cd $APP_DIR && ln -sf $ENV_FILE .env && $APP_DIR/.venv/bin/python manage.py migrate --noinput"
-
-echo "→ Collecting static files..."
-sudo -u $APP_USER bash -c "cd $APP_DIR && $APP_DIR/.venv/bin/python manage.py collectstatic --noinput"
-
-echo "→ Setting up automatic daily backups..."
-# Check if backup timer already exists
-if systemctl list-unit-files | grep -q "blockshelf-backup.timer"; then
-    echo "   Backup timer already configured, updating files..."
-else
-    echo "   Installing backup timer (daily at 2 AM)..."
+cp -- "$DB_BACKUP" "$BACKUP_DIR/database.backup"
+# Keep configuration and uploaded files as well as code. Failed tar aborts the update.
+tar --exclude='opt/blockshelf/.venv' --exclude='*/__pycache__' \
+    --exclude='opt/blockshelf/staticfiles' --exclude='opt/blockshelf/private_imports' \
+    --exclude='opt/blockshelf/logs' --exclude='opt/blockshelf/private_backups' --exclude='opt/blockshelf/media/backups' \
+    -czf "$BACKUP_DIR/installation.tar.gz" -C / opt/blockshelf etc/blockshelf
+# Verify the archive before changing code or schema.
+tar -tzf "$BACKUP_DIR/installation.tar.gz" >/dev/null
+sudo -u "$APP_USER" git checkout --detach "$TARGET"
+sudo -u "$APP_USER" .venv/bin/python -m pip install -r requirements.lock
+sudo -u "$APP_USER" .venv/bin/python manage.py check
+sudo -u "$APP_USER" .venv/bin/python manage.py migrate --noinput
+sudo -u "$APP_USER" .venv/bin/python manage.py redact_audit_secrets
+sudo -u "$APP_USER" .venv/bin/python manage.py relocate_backups
+sudo -u "$APP_USER" .venv/bin/python manage.py collectstatic --noinput
+install -m 0644 scripts/blockshelf-backup.service /etc/systemd/system/
+if [[ ! -f /etc/systemd/system/blockshelf-backup.timer ]]; then
+    install -m 0644 scripts/blockshelf-backup.timer /etc/systemd/system/
 fi
-
-# Copy/update backup service and timer files
-cp $APP_DIR/scripts/blockshelf-backup.service /etc/systemd/system/
-cp $APP_DIR/scripts/blockshelf-backup.timer /etc/systemd/system/
-
-# Reload systemd
 systemctl daemon-reload
-
-# Enable and start timer
-systemctl enable blockshelf-backup.timer
-systemctl start blockshelf-backup.timer
-
-echo "   ✓ Automatic backups configured"
-
-echo "→ Starting BlockShelf service..."
-systemctl start $SERVICE_NAME
-
-echo "→ Checking service status..."
+systemctl start blockshelf
 sleep 2
-if systemctl is-active --quiet $SERVICE_NAME; then
-    echo "✓ Service is running"
-else
-    echo "⚠️  Service may have failed to start"
-    systemctl status $SERVICE_NAME --no-pager -l || true
+systemctl is-active --quiet blockshelf
+if [[ "$TIMER_WAS_ACTIVE" == 1 ]]; then
+    systemctl start blockshelf-backup.timer
 fi
-
-echo ""
-echo "✓ Update complete!"
-echo ""
-echo "Automatic backups: Daily at 2 AM"
-echo "  Check schedule: systemctl list-timers blockshelf-backup.timer"
-echo "  View logs:      sudo journalctl -u blockshelf-backup.service -n 20"
-echo ""
-echo "Service management:"
-echo "  Check status:  sudo systemctl status $SERVICE_NAME"
-echo "  View logs:     sudo journalctl -u $SERVICE_NAME -n 50"
-echo "  Restart:       sudo systemctl restart $SERVICE_NAME"
-echo ""
+trap - ERR
+echo "Installed $TARGET. Recovery files: $BACKUP_DIR"
+echo 'Verify login, inventory, collaboration and readiness before accepting the release.'

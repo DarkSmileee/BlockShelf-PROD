@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from django.core.cache import cache
@@ -49,10 +49,10 @@ class InventoryItem(models.Model):
                 check=Q(quantity_used__lte=models.F('quantity_total')),
                 name='quantity_used_lte_total',
             ),
-            # Prevent duplicate items (same user, part_id, and color)
+            # Keep each part/color/location distinct within an inventory.
             models.UniqueConstraint(
-                fields=['user', 'part_id', 'color'],
-                name='unique_user_part_color',
+                fields=['user', 'part_id', 'color', 'storage_location'],
+                name='unique_user_part_color_location',
             ),
         ]
 
@@ -147,7 +147,7 @@ class RBElement(models.Model):
 
 class UserPreference(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="userpreference")
-    items_per_page = models.PositiveIntegerField(default=25)
+    items_per_page = models.PositiveIntegerField(default=25, validators=[MinValueValidator(5), MaxValueValidator(500)])
     rebrickable_api_key = models.CharField(max_length=80, blank=True)
 
     def __str__(self):
@@ -232,11 +232,17 @@ class InventoryShare(models.Model):
         self.save(update_fields=['is_active', 'revoked_at'])
 
     def record_access(self):
-        """Record an access to this share link."""
-        self.access_count = models.F('access_count') + 1
-        self.last_accessed_at = timezone.now()
-        self.save(update_fields=['access_count', 'last_accessed_at'])
-        self.refresh_from_db()  # Refresh to get the actual count value
+        """Atomically reserve an access; stale readers cannot exceed the limit."""
+        now = timezone.now()
+        reserved = type(self).objects.filter(pk=self.pk, token=self.token, is_active=True).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now)
+        ).filter(
+            models.Q(max_access_count__isnull=True) | models.Q(max_access_count=0)
+            | models.Q(access_count__lt=models.F('max_access_count'))
+        ).update(access_count=models.F('access_count') + 1, last_accessed_at=now)
+        if reserved:
+            self.refresh_from_db()
+        return bool(reserved)
 
     def rotate_token(self):
         """
@@ -320,6 +326,8 @@ class InventoryCollab(models.Model):
     def mark_accepted(self, user):
         if user == self.owner:
             raise ValueError("Owner cannot accept their own invite.")
+        if self.collaborator_id != user.pk:
+            raise ValueError("This invitation belongs to another account.")
         self.collaborator = user
         self.accepted_at = timezone.now()
         self.is_active = True
@@ -347,7 +355,7 @@ class AppConfig(models.Model):
 
     # General (kept)
     site_name = models.CharField(max_length=80, default="BlockShelf", blank=True)
-    items_per_page = models.PositiveIntegerField(default=25)
+    items_per_page = models.PositiveIntegerField(default=25, validators=[MinValueValidator(5), MaxValueValidator(500)])
 
     # Auth/Registration (admin)
     allow_registration = models.BooleanField(default=True)
@@ -364,7 +372,9 @@ class AppConfig(models.Model):
 
     @classmethod
     def get_solo(cls):
-        obj, _ = cls.objects.get_or_create(singleton_id=1)
+        obj, _ = cls.objects.get_or_create(singleton_id=1, defaults={
+            "allow_registration": getattr(settings, "ALLOW_REGISTRATION", True),
+        })
         return obj
 
     # lightweight cache helpers
@@ -430,15 +440,8 @@ class Backup(models.Model):
 
     def delete(self, *args, **kwargs):
         """Override delete to also remove the physical file."""
-        import os
-        from django.conf import settings as django_settings
-
-        file_full_path = os.path.join(django_settings.MEDIA_ROOT, self.file_path)
-        if os.path.exists(file_full_path):
-            try:
-                os.remove(file_full_path)
-            except Exception as e:
-                logger.error(f"Failed to delete backup file {file_full_path}: {e}")
+        from .backup_utils import backup_file_path
+        backup_file_path(self.file_path).unlink(missing_ok=True)
 
         super().delete(*args, **kwargs)
 
@@ -640,3 +643,9 @@ class LoginAttempt(models.Model):
 
         logger.info(f"Cleared {count} failed login attempts for {username}")
         return count
+
+
+class RateLimitBucket(models.Model):
+    key = models.CharField(max_length=200, primary_key=True)
+    count = models.PositiveIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)

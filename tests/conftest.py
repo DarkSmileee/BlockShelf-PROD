@@ -41,11 +41,10 @@ def other_user(db):
 @pytest.fixture
 def user_preferences(user):
     """Create user preferences."""
-    return UserPreference.objects.create(
-        user=user,
-        theme='light',
-        rebrickable_api_key='test_api_key_123'
-    )
+    prefs = user.userpreference
+    prefs.rebrickable_api_key = 'test_api_key_123'
+    prefs.save()
+    return prefs
 
 
 @pytest.fixture
@@ -92,3 +91,18 @@ def admin_client(client, admin_user):
     """Return a Django test client with authenticated admin."""
     client.force_login(admin_user)
     return client
+
+
+@pytest.fixture(autouse=True)
+def isolate_services(settings, tmp_path, monkeypatch):
+    from django.core.cache import cache
+    cache.clear()
+    settings.MEDIA_ROOT = tmp_path / 'media'
+    settings.MEDIA_ROOT.mkdir()
+    settings.BACKUP_ROOT = tmp_path / 'private'
+    settings.REBRICKABLE_TEMP_ROOT = tmp_path / 'imports'
+    def no_network(*args, **kwargs):
+        raise AssertionError('Mock external network calls in tests')
+    monkeypatch.setattr('requests.sessions.Session.request', no_network)
+    yield
+    cache.clear()

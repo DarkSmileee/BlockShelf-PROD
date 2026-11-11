@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% load form_extras %}
 {% load qs %}
 
@@ -48,29 +49,16 @@
 <div class="collapse {% if import_form.errors %}show{% endif %}" id="importCollapse">
   <div class="card card-body shadow-sm mb-3">
     <h2 class="h5">Import CSV</h2>
-    <form method="post" action="{% url 'inventory:import_csv' %}" enctype="multipart/form-data" class="row g-3">
+    <form method="post" action="{% url 'inventory:import_csv' %}?owner={{ owner_context.id }}" enctype="multipart/form-data" class="row g-3">
       {% csrf_token %}
       <div class="col-md-4">
         {{ import_form.file.label_tag }}
         {{ import_form.file|add_class:"form-control" }}
         {% for error in import_form.file.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
       </div>
-      <div class="col-md-4">
-        {{ import_form.strategy.label_tag }}
-        {{ import_form.strategy|add_class:"form-select" }}
-        {% for error in import_form.strategy.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
-      </div>
-      <div class="col-md-4">
-        {{ import_form.delimiter.label_tag }}
-        {{ import_form.delimiter|add_class:"form-select" }}
-        {% for error in import_form.delimiter.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
-      </div>
-      <div class="col-12">
-        {{ import_form.has_header|add_class:"form-check-input" }}
-        <label class="form-check-label" for="{{ import_form.has_header.id_for_label }}">File includes header row</label>
-        {% for error in import_form.has_header.errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
-        {% for error in import_form.non_field_errors %}<div class="invalid-feedback d-block">{{ error }}</div>{% endfor %}
-      </div>
+
+
+
       <div class="col-md-4 d-grid">
         <button class="btn btn-blockshelf-yellow">Upload & Import</button>
       </div>
@@ -81,9 +69,9 @@
 {% with current_sort|default:"name" as cur_sort %}
 {% with current_dir|default:"asc" as cur_dir %}
 
-<form class="row g-2 mb-3" method="get" action=".">
+<form id="inventorySearch" class="row g-2 mb-3" method="get" action=".">
   <div class="col-sm-9 col-md-10">
-    <input type="text" class="form-control" id="inventoryFilter" name="q" value="{{ q }}" placeholder="Search by name, part id, color, location..." />
+    <input type="text" class="form-control" id="inventoryFilter" aria-label="Search inventory" aria-controls="inventoryResults" name="q" value="{{ q }}" placeholder="Search by name, part id, color, location..." />
     <input type="hidden" name="sort" value="{{ cur_sort }}">
     <input type="hidden" name="dir" value="{{ cur_dir }}">
     <input type="hidden" name="owner" value="{{ owner_context.id }}">
@@ -93,6 +81,8 @@
   </div>
 </form>
 
+<p id="inventorySearchStatus" class="text-muted small" role="status" aria-live="polite"></p>
+<div id="inventoryResults" data-owner="{{ owner_context.pk }}" data-count="{{ page_obj.paginator.count }}">
 <div class="table-responsive">
   <table class="table table-striped align-middle shadow-sm inventory-table">
     <colgroup>
@@ -238,6 +228,7 @@
     {% endif %}
   </ul>
 </nav>
+</div>
 
 <!-- Image preview modal -->
 <div class="modal fade" id="imgPreviewModal" tabindex="-1" aria-labelledby="imgPreviewModalLabel" aria-hidden="true">
@@ -260,6 +251,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{% static 'js/inventory-search.js' %}" defer></script>
 <script>
 (function(){
   // Fallback toggle if Bootstrap's JS isn't present
@@ -283,31 +275,6 @@
     if(titleEl){ titleEl.textContent = title; }
     if(openLink){ openLink.href = imgUrl; }
   });
-
-  // =================== REAL-TIME FILTERING ===================
-  // Filter inventory table in real-time as user types
-  const inventoryFilterInput = document.getElementById('inventoryFilter');
-  if (inventoryFilterInput) {
-    inventoryFilterInput.addEventListener('input', function() {
-      const filter = this.value.toLowerCase();
-      const rows = document.querySelectorAll('#inventoryTableBody tr.data-row');
-
-      rows.forEach(row => {
-        const name = row.getAttribute('data-name') || '';
-        const part = row.getAttribute('data-part') || '';
-        const color = row.getAttribute('data-color') || '';
-        const location = row.getAttribute('data-location') || '';
-
-        // Show row if any field matches the filter
-        if (name.includes(filter) || part.includes(filter) ||
-            color.includes(filter) || location.includes(filter)) {
-          row.style.display = '';
-        } else {
-          row.style.display = 'none';
-        }
-      });
-    });
-  }
 
   // =================== SORTING PERSISTENCE ===================
   // Save sorting preferences to localStorage and restore them on page load
@@ -353,8 +320,9 @@
     if (urlParams.sort && urlParams.dir) {
       saveSortPrefs(urlParams.sort, urlParams.dir);
     }
-    // If no sort params in URL and no search query, restore from localStorage
-    else if (!hasSearchQuery && !urlParams.sort && !urlParams.dir) {
+    // A reload would consume the one-time save/error notification.
+    else if (!hasSearchQuery && !urlParams.sort && !urlParams.dir &&
+             !document.querySelector('[data-flash-message]')) {
       const saved = loadSortPrefs();
       if (saved && saved.sort && saved.dir) {
         // Build new URL with saved sorting

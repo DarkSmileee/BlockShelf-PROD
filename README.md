@@ -43,11 +43,18 @@
 
 ### Production Deployment (Recommended)
 
-One-line installation for Ubuntu/Debian servers:
+Install on Ubuntu/Debian using the revision already verified on Linux staging:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf-PROD/main/scripts/install_blockshelf.sh | sudo bash
+git clone https://github.com/DarkSmileee/BlockShelf.git BlockShelf-release
+cd BlockShelf-release
+git checkout --detach TESTED_COMMIT_SHA
+sudo bash scripts/install_blockshelf.sh TESTED_COMMIT_SHA
 ```
+
+The installer creates a fresh database; use the updater for an existing installation.
+Configure the active Nginx site and certificates separately. Its upstream must match
+Gunicorn at `127.0.0.1:8000`; see [rollout instructions](docs/AUDIT_FIXES.md).
 
 The installer walks you through hostname, time zone, email backend, Cloudflare Turnstile keys, and whether to seed an admin user—no manual `.env` edits required for common settings.
 
@@ -84,19 +91,19 @@ When enabled, both the first-party login page (`/login/`) and the allauth page (
 ### Update Existing Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DarkSmileee/BlockShelf-PROD/main/scripts/update.sh | sudo bash
+sudo bash scripts/update.sh TESTED_COMMIT_SHA
 ```
 
 **What it does:**
-- Creates backup of current installation
-- Pulls latest code from GitHub
-- Updates Python dependencies
+- Stops application writes and creates a final recovery backup of the installation
+- Checks out the explicitly selected tested revision
+- Installs the tested dependency lock file
 - Runs database migrations
 - Collects static files
 - Sets up/updates automatic daily backups at 2 AM
 - Restarts the service
 
-Safe update that preserves database and settings.
+Read [the safe rollout and recovery instructions](docs/AUDIT_FIXES.md) first. Updates require a tested revision; restores require a new destination. Verify legacy backup relocation and the active Nginx configuration before deployment.
 
 ### Development Setup
 
@@ -163,28 +170,22 @@ python manage.py runserver
 
 ## 🔄 Updating
 
+Use the tested updater from the selected release. Read
+[the rollout and recovery instructions](docs/AUDIT_FIXES.md) first.
+
 ```bash
-# 1. Backup first!
-python manage.py create_backups --full-db
-
-# 2. Pull latest code
-git pull origin main
-
-# 3. Update dependencies
-pip install -r requirements.txt
-
-# 4. Run migrations
-python manage.py migrate
-
-# 5. Collect static files
-python manage.py collectstatic --noinput
-
-# 6. Restart
-sudo systemctl restart blockshelf
-
-# 7. Verify
-curl http://localhost/inventory/health/
+sudo bash /path/to/tested-release/scripts/update.sh TESTED_COMMIT_SHA
 ```
+
+The updater stops the application and backup timer/service before the final
+recovery snapshot. It installs `requirements.lock`, applies migrations (including
+location uniqueness and atomic rate-limit counters), redacts historic audit-key
+copies, relocates legacy backups, collects static files, and restarts the service.
+The backup timer is restarted only if it was previously active. A failure leaves
+the application stopped for inspection; do not blindly roll back schema changes.
+
+Do not use an unpinned `git pull` or `requirements.txt` for a production update.
+Verify the active proxy and bind address together before scheduling the update.
 
 ---
 
@@ -232,8 +233,8 @@ sudo systemctl start blockshelf-backup.service
 ```
 
 **Backup locations:**
-- Full DB: `media/backups/full_db/`
-- User inventories: `media/backups/user_inventory/{user_id}/`
+- Full DB: `private_backups/backups/full_db/` (or the configured `BACKUP_ROOT`)
+- User inventories: `private_backups/backups/user_inventory/{user_id}/`
 
 **Admin features:**
 - View all backups in Settings > Backups tab

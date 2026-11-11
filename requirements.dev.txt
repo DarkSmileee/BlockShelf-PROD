@@ -1,5 +1,5 @@
 # Development-only dependencies build on the runtime requirements list.
--r requirements.txt
+-r requirements.lock
 
 pytest>=7.4
 pytest-django>=4.5

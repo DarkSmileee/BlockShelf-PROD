@@ -1,6 +1,5 @@
 from django import forms
 from django.contrib.auth import get_user_model
-from django.contrib.auth.forms import PasswordChangeForm as DjangoPasswordChangeForm
 
 from .models import (
     InventoryItem,
@@ -13,6 +12,14 @@ User = get_user_model()
 
 
 class InventoryItemForm(forms.ModelForm):
+    version = forms.CharField(required=False, widget=forms.HiddenInput)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields['version'].required = True
+            self.initial['version'] = self.instance.updated_at.isoformat()
+
     class Meta:
         model = InventoryItem
         fields = ['name', 'part_id', 'color', 'quantity_total', 'quantity_used', 'storage_location', 'image_url', 'notes']
@@ -26,6 +33,15 @@ class InventoryItemForm(forms.ModelForm):
         qu = cleaned.get('quantity_used') or 0
         if qu > qt:
             self.add_error('quantity_used', 'Used quantity cannot exceed total quantity.')
+        if self.instance.user_id and all(k in cleaned for k in ('part_id', 'color', 'storage_location')):
+            duplicates = InventoryItem.objects.filter(
+                user_id=self.instance.user_id, part_id=cleaned['part_id'],
+                color=cleaned['color'], storage_location=cleaned['storage_location'],
+            ).exclude(pk=self.instance.pk)
+            if duplicates.exists():
+                raise forms.ValidationError(
+                    'This part and colour already exist at this location. Edit the existing item to change its quantity.'
+                )
         return cleaned
 
 
@@ -72,29 +88,13 @@ class ImportCSVForm(forms.Form):
 class ProfileForm(forms.ModelForm):
     class Meta:
         model = User
-        fields = ["username", "email"]
+        fields = ["username"]
         widgets = {
             "username": forms.TextInput(attrs={"class": "form-control", "autocomplete": "username"}),
-            "email": forms.EmailInput(attrs={"class": "form-control", "autocomplete": "email"}),
         }
         help_texts = {
             "username": None,
         }
-
-
-class PasswordChangeForm(DjangoPasswordChangeForm):
-    old_password = forms.CharField(
-        label="Current password",
-        widget=forms.PasswordInput(attrs={"class": "form-control", "autocomplete": "current-password"}),
-    )
-    new_password1 = forms.CharField(
-        label="New password",
-        widget=forms.PasswordInput(attrs={"class": "form-control", "autocomplete": "new-password"}),
-    )
-    new_password2 = forms.CharField(
-        label="New password (again)",
-        widget=forms.PasswordInput(attrs={"class": "form-control", "autocomplete": "new-password"}),
-    )
 
 
 class InviteCollaboratorForm(forms.Form):
@@ -110,35 +110,6 @@ class InviteCollaboratorForm(forms.Form):
         label="Allow deleting items", required=False, initial=False
     )
 
-
-class InventoryImportForm(forms.Form):
-    STRATEGY_CHOICES = [
-        ("append", "Append new rows"),
-        ("update", "Update existing by Part ID"),
-        ("replace", "Replace my inventory"),
-    ]
-    DELIMITER_CHOICES = [
-        (",", "Comma (,)"),
-        (";", "Semicolon (;)"),
-        ("\t", "Tab"),
-    ]
-
-    file = forms.FileField(label="CSV file")
-    strategy = forms.ChoiceField(choices=STRATEGY_CHOICES, initial="append")
-    delimiter = forms.ChoiceField(choices=DELIMITER_CHOICES, initial=",")
-    has_header = forms.BooleanField(
-        label="File includes header row", required=False, initial=True
-    )
-
-    def clean_file(self):
-        f = self.cleaned_data["file"]
-        name = (f.name or "").lower()
-        if not (name.endswith(".csv") or name.endswith(".txt")):
-            raise forms.ValidationError("Please upload a .csv or .txt file.")
-        return f
-
-
-# ---------- NEW SPLIT FOR SETTINGS ----------
 
 class AppConfigForm(forms.ModelForm):
     """Admin-only site settings."""

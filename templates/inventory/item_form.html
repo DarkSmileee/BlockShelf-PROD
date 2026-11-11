@@ -7,23 +7,17 @@
   <a href="{% url 'inventory:list' %}" class="btn btn-outline-secondary" aria-label="Return to inventory list">Back to Inventory</a>
 </div>
 
-{% if duplicate %}
-<div class="alert alert-warning" role="alert">
-  <strong>Possible duplicate.</strong> Same Part ID and Color already exist.
-  Click <em>Save</em> again to confirm.
-</div>
-{% endif %}
-
 <!-- Aria live region for announcements -->
 <div id="ariaLiveRegion" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
 
 <form method="post" class="row g-3" data-validate="true">
   {% csrf_token %}
+  {{ form.version }}
+  {% for error in form.version.errors %}<div class="alert alert-danger" role="alert">Please reload this item before saving: {{ error }}</div>{% endfor %}
 
-  {# if duplicate re-submit, set the confirm flag #}
-  {% if duplicate %}
-    <input type="hidden" name="confirm_duplicate" value="1">
-  {% endif %}
+  {% for error in form.non_field_errors %}
+    <div class="col-12"><div class="alert alert-danger" role="alert">{{ error }}</div></div>
+  {% endfor %}
 
   <div class="col-md-4">
     {{ form.name.label_tag }}
@@ -53,7 +47,7 @@
     {{ form.image_url.label_tag }}
     {{ form.image_url|add_class:"form-control" }}
     <div class="form-text" id="imageUrlHelp">
-      If this URL is a Rebrickable element image (<code>.../elements/&lt;number&gt;.jpg</code>), we'll store that element number automatically.
+      Enter an image URL, or use Lookup to fill it. Element-number searches use the catalogue mapping for this part and colour.
     </div>
     {% for e in form.image_url.errors %}<div class="invalid-feedback d-block">{{ e }}</div>{% endfor %}
   </div>
@@ -82,11 +76,6 @@
     {% for e in form.storage_location.errors %}<div class="invalid-feedback d-block">{{ e }}</div>{% endfor %}
   </div>
 
-  {# element_id field (hidden visually, still posts through the form) #}
-  <div class="d-none">
-    {{ form.element_id }}
-  </div>
-
   <div class="col-12 d-flex gap-2">
     <a href="{% url 'inventory:list' %}" class="btn btn-outline-secondary" aria-label="Cancel and return to inventory list">Cancel</a>
     <button type="submit" class="btn btn-blockshelf-blue" aria-label="Save inventory item">Save</button>
@@ -104,7 +93,6 @@
   const nameInput = id('id_name');
   const colorInput = id('id_color');
   const imgInput = id('id_image_url');
-  const elemHidden = id('id_element_id');
   const quantityTotalInput = id('id_quantity_total');
   const quantityUsedInput = id('id_quantity_used');
   const btn = id('btnLookup');
@@ -151,22 +139,6 @@
     }
   }
 
-  function extractElementId(url){
-    const m = String(url || '').match(/\/elements\/(\d+)\.jpg/i);
-    return m ? m[1] : '';
-  }
-
-  // whenever image url changes, infer element id
-  function syncElementFromImage(){
-    if (!imgInput || !elemHidden) return;
-    const eid = extractElementId(imgInput.value);
-    if (eid) elemHidden.value = eid;
-  }
-  if (imgInput) {
-    imgInput.addEventListener('change', syncElementFromImage);
-    imgInput.addEventListener('blur', syncElementFromImage);
-  }
-
   if (btn) {
     btn.addEventListener('click', async function(){
       if (!partInput || !partInput.value.trim()) {
@@ -208,13 +180,8 @@
         // image_url: set (always overwrite; user can change)
         if (data.image_url && imgInput && !imgInput.value) {
 		  imgInput.value = data.image_url;
-		  syncElementFromImage();
 		  updatedFields.push('image URL');
 		}
-        // element id direct from API, if provided
-        if (data.element_id && elemHidden) {
-          elemHidden.value = data.element_id;
-        }
         // If user typed a numeric element id in part field and API returns canonical part_id,
         // replace the part field with the canonical part id
         if (partInput && /^\d{6,}$/.test(partInput.value.trim()) && data.part_id) {

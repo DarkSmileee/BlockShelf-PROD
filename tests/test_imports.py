@@ -28,7 +28,7 @@ Tile 1x1,3070,Yellow,200,20,Box B1"""
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 
@@ -62,7 +62,7 @@ Plate 2x2,3022,Blue,50"""
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 
@@ -85,7 +85,7 @@ value1,value2,value3"""
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 
@@ -110,7 +110,7 @@ Brick 2x4,Red"""  # Missing part_id
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 
@@ -135,7 +135,7 @@ Brick 2x4,Red"""  # Missing part_id
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 
@@ -158,7 +158,7 @@ Plate "Special",3022,Blue,50,Test's apostrophe"""
 
         response = authenticated_client.post(
             reverse('inventory:import_csv'),
-            {'csv_file': csv_file},
+            {'file': csv_file},
             follow=True
         )
 

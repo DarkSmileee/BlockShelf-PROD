@@ -5,12 +5,15 @@ Handles listing, creating, updating, deleting, and importing/exporting inventory
 
 import csv
 import logging
+from itertools import islice
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.db.models import F, Q
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -31,6 +34,8 @@ from .helpers import (
     to_int,
     to_str,
 )
+
+from .helpers import search_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +78,7 @@ def inventory_list(request: HttpRequest) -> HttpResponse:
         if direction == "desc":
             order_field = f"-{order_field}"
 
-        if query:
-            queryset = queryset.filter(
-                Q(name__icontains=query)
-                | Q(part_id__icontains=query)
-                | Q(color__icontains=query)
-                | Q(storage_location__icontains=query)
-            )
+        queryset = search_inventory(queryset, query)
 
         queryset = queryset.order_by(order_field, "id")
 
@@ -88,7 +87,7 @@ def inventory_list(request: HttpRequest) -> HttpResponse:
         if hasattr(request.user, 'userpreference'):
             per_page = request.user.userpreference.items_per_page or DEFAULT_ITEMS_PER_PAGE
 
-        paginator = Paginator(queryset, per_page)
+        paginator = Paginator(queryset, max(5, min(500, per_page)))
         page_obj = paginator.get_page(request.GET.get("page"))
 
         # Permissions
@@ -143,13 +142,18 @@ def item_create(request: HttpRequest) -> HttpResponse:
             return HttpResponseForbidden("You do not have permission to add items here.")
 
         if request.method == "POST":
-            form = InventoryItemForm(request.POST)
+            form = InventoryItemForm(request.POST, instance=InventoryItem(user=owner))
             if form.is_valid():
                 item = form.save(commit=False)
                 item.user = owner
-                item.save()
-                messages.success(request, "Item added.")
-                return redirect(f"{reverse('inventory:list')}?owner={owner.pk}")
+                try:
+                    with transaction.atomic():
+                        item.save()
+                except (ValidationError, IntegrityError):
+                    form.add_error(None, "The item could not be saved. Check whether this part and colour already exist at this location.")
+                else:
+                    messages.success(request, "Item added.")
+                    return redirect(f"{reverse('inventory:list')}?owner={owner.pk}")
         else:
             form = InventoryItemForm()
 
@@ -177,9 +181,22 @@ def item_update(request: HttpRequest, pk: int) -> HttpResponse:
         if request.method == "POST":
             form = InventoryItemForm(request.POST, instance=item)
             if form.is_valid():
-                form.save()
-                messages.success(request, "Item updated.")
-                return redirect(f"{reverse('inventory:list')}?owner={owner.pk}")
+                try:
+                    with transaction.atomic():
+                        current = InventoryItem.objects.select_for_update().get(pk=item.pk)
+                        if form.cleaned_data['version'] != current.updated_at.isoformat():
+                            form.add_error(None, "This item changed since you opened it. Your entries are kept below. Reload the item and review the latest values before saving.")
+                        else:
+                            form.save()
+                except (ValidationError, IntegrityError):
+                    form.add_error(None, "The item could not be saved. Check whether this part and colour already exist at this location.")
+                else:
+                    if form.errors:
+                        return render(request, "inventory/item_form.html", {
+                            "form": form, "item": item, "owner_context": owner,
+                        }, status=409)
+                    messages.success(request, "Item updated.")
+                    return redirect(f"{reverse('inventory:list')}?owner={owner.pk}")
         else:
             form = InventoryItemForm(instance=item)
 
@@ -222,6 +239,7 @@ def item_delete(request: HttpRequest, pk: int) -> HttpResponse:
 def export_csv(request: HttpRequest) -> HttpResponse:
     """Export current user's inventory to CSV."""
     try:
+        owner = get_owner_from_request(request)
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = 'attachment; filename="inventory.csv"'
 
@@ -231,7 +249,7 @@ def export_csv(request: HttpRequest) -> HttpResponse:
             'storage_location', 'image_url', 'notes'
         ])
 
-        for item in InventoryItem.objects.filter(user=request.user).order_by('name'):
+        for item in InventoryItem.objects.filter(user=owner).order_by('name'):
             writer.writerow([
                 item.name,
                 item.part_id,
@@ -258,6 +276,9 @@ def import_csv(request: HttpRequest) -> HttpResponse:
         return redirect("inventory:list")
 
     try:
+        owner = get_owner_from_request(request)
+        if not can_edit(request.user, owner):
+            return HttpResponseForbidden("You do not have permission to import here.")
         form = ImportCSVForm(request.POST, request.FILES)
         if not form.is_valid():
             messages.error(request, "Invalid file upload.")
@@ -281,7 +302,9 @@ def import_csv(request: HttpRequest) -> HttpResponse:
             return redirect("inventory:list")
 
         # Convert to list and validate row count
-        rows = list(rows)
+        rows = list(islice(rows, CSV_IMPORT_MAX_ROWS + 1))
+        if not rows or not {"part_id", "color"}.issubset(rows[0]):
+            raise ValueError("Invalid file: part_id and color headers are required.")
 
         if len(rows) > CSV_IMPORT_MAX_ROWS:
             messages.error(
@@ -291,7 +314,7 @@ def import_csv(request: HttpRequest) -> HttpResponse:
             return redirect("inventory:list")
 
         # Process rows
-        added, updated, skipped, dupe_keys = process_import_rows(request.user, rows)
+        added, updated, skipped, dupe_keys = process_import_rows(owner, rows)
 
         # Build success message
         msg = f"Import complete: {added} added, {updated} updated, {skipped} skipped."
@@ -299,12 +322,24 @@ def import_csv(request: HttpRequest) -> HttpResponse:
             msg += f" (Note: {dupe_keys} duplicate key set(s) existed; updated the first match.)"
 
         messages.success(request, msg)
-        return redirect("inventory:list")
+        return redirect(f"{reverse('inventory:list')}?owner={owner.pk}")
 
     except Exception as e:
         logger.exception("Error in import_csv view")
         messages.error(request, f"Import failed: {str(e)}")
         return redirect("inventory:list")
+
+
+def import_quantity(value, field, row_number):
+    if value is None or str(value).strip() == '':
+        return 0
+    try:
+        number = Decimal(str(value).strip())
+        if not number.is_finite() or number < 0 or number > 2147483647 or number != number.to_integral_value():
+            raise ValueError
+        return int(number)
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"Invalid {field} on row {row_number}: use a non-negative whole number without separators.")
 
 
 def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, int, int, int]:
@@ -315,7 +350,7 @@ def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, in
     added = updated = skipped = dupe_keys = 0
 
     with transaction.atomic():
-        for row in rows:
+        for row_number, row in enumerate(rows, start=2):
             data = {normalize_key(k): v for k, v in row.items()}
 
             # Skip empty rows
@@ -326,8 +361,8 @@ def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, in
             name = to_str(data.get('name'))
             part_id = to_str(data.get('part_id'))
             color = to_str(data.get('color'))
-            quantity_total = to_int(data.get('quantity_total'), 0)
-            quantity_used = to_int(data.get('quantity_used'), 0)
+            quantity_total = import_quantity(data.get('quantity_total'), 'quantity_total', row_number)
+            quantity_used = import_quantity(data.get('quantity_used'), 'quantity_used', row_number)
             location = to_str(data.get('storage_location'))
             image_url = to_str(data.get('image_url'))
             notes = to_str(data.get('notes'))
@@ -338,10 +373,11 @@ def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, in
                 continue
 
             # Check for existing item
-            queryset = InventoryItem.objects.filter(
+            queryset = InventoryItem.objects.select_for_update().filter(
                 user=user,
                 part_id=part_id,
                 color=color,
+                storage_location=location,
             )
 
             if not queryset.exists():
@@ -375,11 +411,8 @@ def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, in
                     obj.storage_location = location
                 if image_url:
                     obj.image_url = image_url
-                if notes:
-                    if obj.notes and notes not in obj.notes:
-                        obj.notes = (obj.notes + "\n" + notes).strip()
-                    else:
-                        obj.notes = notes or obj.notes
+                if notes and notes not in obj.notes:
+                    obj.notes = (obj.notes + "\n" + notes).strip()
 
                 obj.save()
                 updated += 1
@@ -389,7 +422,7 @@ def process_import_rows(user: User, rows: list[dict[str, Any]]) -> tuple[int, in
 
 @login_required
 def check_duplicate(request: HttpRequest) -> JsonResponse:
-    """Check if a duplicate inventory item exists (same part_id + color)."""
+    """Check if a duplicate inventory item exists (same part_id + color + location)."""
     try:
         part_id = (request.GET.get("part_id") or "").strip()
         color = (request.GET.get("color") or "").strip()
@@ -399,6 +432,7 @@ def check_duplicate(request: HttpRequest) -> JsonResponse:
             user=request.user,
             part_id__iexact=part_id,
             color__iexact=color,
+            storage_location=(request.GET.get("storage_location") or "").strip(),
         )
 
         if exclude_pk:

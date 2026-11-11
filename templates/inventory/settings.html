@@ -70,6 +70,10 @@
           <form method="post" action="{% url 'inventory:settings' %}?tab=account" novalidate class="compact-inputs">
             {% csrf_token %}
             <input type="hidden" name="action" value="update_profile">
+            <p>Email: {{ request.user.email|default:"Not set" }}.
+              <a href="{% url 'account_email' %}">Change email</a>
+            </p>
+            <p class="form-text">A new email address must be verified before it replaces your current address.</p>
             {{ profile_form.non_field_errors }}
             {% for field in profile_form %}
               <div class="mb-3">
@@ -162,13 +166,7 @@
               </div>
             </div>
 
-            <div class="mb-3">
-              <label class="form-label" for="{{ user_settings_form.theme.id_for_label }}">Theme</label>
-              {{ user_settings_form.theme }}
-              {% if user_settings_form.theme.errors %}
-                <div class="text-danger small">{{ user_settings_form.theme.errors }}</div>
-              {% endif %}
-            </div>
+            <p class="text-muted">Use the theme toggle in the top navigation to switch between light and dark mode on this browser.</p>
 
             <button type="submit" class="btn btn-blockshelf-blue">Save settings</button>
           </form>
@@ -883,6 +881,12 @@
       if (Array.isArray(data.messages) && data.messages.length)
         data.messages.forEach(m => appendLog(log, m));
 
+      if (data.retry_after) {
+        if (progText) progText.textContent = `Lookup paused. Retrying in ${data.retry_after} seconds…`;
+        await new Promise(resolve => setTimeout(resolve, data.retry_after * 1000));
+        await runBatch();
+        return;
+      }
       if (data.done || processed >= total){
         running = false;
         if (btnStart) btnStart.disabled = false;
